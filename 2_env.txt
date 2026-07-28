@@ -1,0 +1,100 @@
+version: '3.8'
+
+services:
+  vllm-server:
+    image: vllm-intel-xpu:2026-07-28_06-41-03a2d03367
+    pull_policy: never
+    ports:
+      - "8002:8000"
+    #shm_size: '32gb'
+    ipc: host
+    privileged: true
+    environment:
+      - VLLM_WORKER_MULTIPROC_METHOD=spawn
+      #- VLLM_RPC_TIMEOUT=600000 - opcja zotala juz usunieta, mozna wywalic
+      - VLLM_ENGINE_ITERATION_TIMEOUT_S=600 # Wymusza dłuższy czas oczekiwania na iterację
+      #- CCL_TOPO_FABRIC_VERTEX_CONNECTION_CHECK=0 # Rozwiązuje problem z zawieszaniem się CCL na szynie PCIe      
+      - HF_TOKEN=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
+      #- VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+      - HF_HUB_DISABLE_SYMLINKS=1
+      #- VLLM_XPU_ENABLE_XPU_GRAPH=1
+      #- SYCL_PI_LEVEL_ZERO_USE_IMMEDIATE_COMMANDLISTS=1
+      #- UR_L0_USE_IMMEDIATE_COMMANDLISTS=1
+      #- VLLM_MLA_DISABLE=1
+      #- SYCL_UR_TRACE=-1
+      #- UR_LOG_LEVEL=info
+      #- CCL_ALLREDUCE=ring
+      #- UR_L0_V2_FORCE_DISABLE_COPY_OFFLOAD=1
+      #- TRITON_PRINT_AUTOTUNING=1
+      #
+      # === oneCCL mitigations below ===
+      #- CCL_ENABLE_SYCL_KERNELS=0
+      #- TORCH_LLM_ALLREDUCE=1
+      #- CCL_ALLREDUCE=ring
+      #- CCL_TOPO_FABRIC_VERTEX_CONNECTION_CHECK=0
+      #- CCL_ZE_CACHE_OPEN_IPC_HANDLES=0
+      #- SYCL_UR_USE_LEVEL_ZERO_V2=0
+      #- CCL_ATL_TRANSPORT=ofi
+      #- CCL_ZE_IPC_EXCHANGE=sockets
+      - CCL_TOPO_P2P_ACCESS=0 
+    devices:
+      - /dev/dri/card0:/dev/dri/card0
+      - /dev/dri/renderD128:/dev/dri/renderD128
+      - /dev/dri/card1:/dev/dri/card1
+      - /dev/dri/renderD129:/dev/dri/renderD129
+    volumes:
+      #- triton_cache5:/root/.triton/cache
+      #- igc_cache5:/root/.cache/neo_compiler_cache
+      #- vllm_compile_cache5:/root/.cache/vllm
+      - vllm_hf_cache:/root/.cache/huggingface
+      - /dev/dri/by-path:/dev/dri/by-path
+    entrypoint: []
+    restart: unless-stopped
+    command: >
+      bash -c "vllm serve webhie/Qwen3.6-27B-int4-AutoRound-Code
+      --served-model-name webhie/Qwen3.6-27B-int4-AutoRound
+      --dtype auto
+      --port 8000
+      --gpu-memory-utilization 0.93
+      --tensor-parallel-size 2
+      --trust-remote-code
+      --max-model-len 131072
+      --kv-cache-dtype fp8
+      --max-num-seqs 64
+      --enable-auto-tool-choice
+      --reasoning-parser qwen3
+      --tool-call-parser qwen3_xml
+      --enable-prompt-tokens-details
+      --enable-chunked-prefill
+      --max-num-batched-tokens 2048
+      --enforce-eager
+      --enable-prefix-caching"
+    #--default-chat-template-kwargs '{"enable_thinking": true, "thinking_token_budget": 8192}'
+    #--kv-offloading-backend native
+    #--kv-offloading-size 8
+    #--default-chat-template-kwargs '{"enable_thinking": false}'
+    #--enable-prefix-caching
+    #--speculative-config '{"method":"ngram","num_speculative_tokens":1}'
+    #--speculative-config '{"method":"mtp","num_speculative_tokens":3}'
+    #--kv-offloading-backend native
+    #--kv-offloading-size 16
+    #--disable-hybrid-kv-cache-manager
+    #--speculative-config '{"method":"ngram","num_speculative_tokens":5,"prompt_lookup_min":4,"prompt_lookup_max":4}'
+    #--mamba-cache-mode align
+    #--speculative-config '{"method":"ngram","num_speculative_tokens":5,"prompt_lookup_min":4,"prompt_lookup_max":4}'
+    #--speculative-config '{"method":"mtp","num_speculative_tokens":3}'
+    #--mamba-ssm-cache-dtype float16
+    #--mamba-cache-dtype float16
+    #--enable-prefix-caching
+    #--dtype float16
+    # 32768 65536 98304 131072 147456 163840 196608 229376 253952 258048 262144
+    #--async-scheduling
+    #--block-size 64
+    #--enable-prefix-caching
+
+volumes:
+  #triton_cache5:
+  #igc_cache5:
+  #vllm_compile_cache5:
+  vllm_hf_cache:
+    external: true
