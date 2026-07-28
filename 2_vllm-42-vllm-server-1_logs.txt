@@ -47,15 +47,24 @@
 (Worker_TP0 pid=532) INFO 07-28 07:52:30 [flash_attn.py:789] Using FlashAttention version 2
 (Worker_TP0 pid=532) INFO 07-28 07:52:31 [weight_utils.py:867] Filesystem type for checkpoints: ZFS. Checkpoint size: 17.69 GiB. Available RAM: 17.54 GiB.
 (Worker_TP0 pid=532) INFO 07-28 07:52:31 [weight_utils.py:897] Auto-prefetch is disabled because the filesystem (ZFS) is not a recognized network FS (NFS/Lustre) and the checkpoint size (17.69 GiB) exceeds 90% of available RAM (17.54 GiB).
-(Worker_TP0 pid=532) Loading safetensors checkpoint shards:   0% Completed | 0/8 [00:00<?, ?it/s]
-(Worker_TP0 pid=532) Loading safetensors checkpoint shards:  12% Completed | 1/8 [00:04<00:34,  4.98s/it]
-(Worker_TP0 pid=532) Loading safetensors checkpoint shards:  25% Completed | 2/8 [00:10<00:30,  5.16s/it]
-(Worker_TP0 pid=532) Loading safetensors checkpoint shards:  38% Completed | 3/8 [00:16<00:27,  5.44s/it]
-(Worker_TP0 pid=532) Loading safetensors checkpoint shards:  50% Completed | 4/8 [00:21<00:22,  5.53s/it]
-(Worker_TP0 pid=532) Loading safetensors checkpoint shards:  62% Completed | 5/8 [00:23<00:12,  4.16s/it]
-(Worker_TP0 pid=532) Loading safetensors checkpoint shards:  75% Completed | 6/8 [00:34<00:12,  6.46s/it]
-(Worker_TP0 pid=532) Loading safetensors checkpoint shards:  88% Completed | 7/8 [00:40<00:06,  6.32s/it]
-(Worker_TP0 pid=532) Loading safetensors checkpoint shards: 100% Completed | 8/8 [00:40<00:00,  5.05s/it]
+(Worker_TP0 pid=532) 
+Loading safetensors checkpoint shards:   0% Completed | 0/8 [00:00<?, ?it/s]
+(Worker_TP0 pid=532) 
+Loading safetensors checkpoint shards:  12% Completed | 1/8 [00:04<00:34,  4.98s/it]
+(Worker_TP0 pid=532) 
+Loading safetensors checkpoint shards:  25% Completed | 2/8 [00:10<00:30,  5.16s/it]
+(Worker_TP0 pid=532) 
+Loading safetensors checkpoint shards:  38% Completed | 3/8 [00:16<00:27,  5.44s/it]
+(Worker_TP0 pid=532) 
+Loading safetensors checkpoint shards:  50% Completed | 4/8 [00:21<00:22,  5.53s/it]
+(Worker_TP0 pid=532) 
+Loading safetensors checkpoint shards:  62% Completed | 5/8 [00:23<00:12,  4.16s/it]
+(Worker_TP0 pid=532) 
+Loading safetensors checkpoint shards:  75% Completed | 6/8 [00:34<00:12,  6.46s/it]
+(Worker_TP0 pid=532) 
+Loading safetensors checkpoint shards:  88% Completed | 7/8 [00:40<00:06,  6.32s/it]
+(Worker_TP0 pid=532) 
+Loading safetensors checkpoint shards: 100% Completed | 8/8 [00:40<00:00,  5.05s/it]
 (Worker_TP0 pid=532) 
 (Worker_TP0 pid=532) INFO 07-28 07:53:12 [default_loader.py:430] Loading weights took 40.60 seconds
 (Worker_TP0 pid=532) INFO 07-28 07:53:17 [gpu_model_runner.py:5397] Model loading took 8.82 GiB memory and 46.309037 seconds
@@ -534,25 +543,6 @@
 (APIServer pid=1)     wait_for_engine_startup(
 (APIServer pid=1)   File "/opt/venv/lib/python3.12/site-packages/vllm/v1/engine/utils.py", line 1269, in wait_for_engine_startup
 (APIServer pid=1)     raise RuntimeError(
-(APIServer pid=1) RuntimeError: Engine core initialization failed. See root cause above. Failed core proc(s): {'EngineCore': 1}
-(APIServer pid=1) INFO 07-28 07:53:44 [api_utils.py:345] 
-(APIServer pid=1) INFO 07-28 07:53:44 [api_utils.py:345]        █     █     █▄   ▄█
-(APIServer pid=1) INFO 07-28 07:53:44 [api_utils.py:345]  ▄▄ ▄█ █     █     █ ▀▄▀ █  version 0.26.1rc1.dev23+g03a2d0336.d20260728
-(APIServer pid=1) INFO 07-28 07:53:44 [api_utils.py:345]   █▄█▀ █     █     █     █  model   webhie/Qwen3.6-27B-int4-AutoRound-Code
-(APIServer pid=1) INFO 07-28 07:53:44 [api_utils.py:345]    ▀▀  ▀▀▀▀▀ ▀▀▀▀▀ ▀     ▀
-(APIServer pid=1) INFO 07-28 07:53:44 [api_utils.py:345] 
-(APIServer pid=1) INFO 07-28 07:53:44 [api_utils.py:273] non-default args: {'model_tag': 'webhie/Qwen3.6-27B-int4-AutoRound-Code', 'enable_auto_tool_choice': True, 'tool_call_parser': 'qwen3_xml', 'enable_prompt_tokens_details': True, 'model': 'webhie/Qwen3.6-27B-int4-AutoRound-Code', 'trust_remote_code': True, 'max_model_len': 131072, 'enforce_eager': True, 'served_model_name': ['webhie/Qwen3.6-27B-int4-AutoRound'], 'reasoning_parser': 'qwen3', 'tensor_parallel_size': 2, 'gpu_memory_utilization': 0.93, 'kv_cache_dtype': 'fp8', 'enable_prefix_caching': True, 'max_num_batched_tokens': 2048, 'max_num_seqs': 64, 'enable_chunked_prefill': True}
-(APIServer pid=1) INFO 07-28 07:53:45 [model.py:629] Resolved architecture: Qwen3_5ForConditionalGeneration
-(APIServer pid=1) INFO 07-28 07:53:45 [model.py:1864] Using max model len 131072
-(APIServer pid=1) INFO 07-28 07:53:48 [cache.py:296] Using fp8 data type to store kv cache. It reduces the GPU memory footprint and boosts the performance. Meanwhile, it may cause accuracy drop without a proper scaling factor
-(APIServer pid=1) WARNING 07-28 07:53:48 [config.py:563] Mamba cache mode is set to 'align' for Qwen3_5ForConditionalGeneration by default when prefix caching is enabled
-(APIServer pid=1) INFO 07-28 07:53:48 [config.py:583] Warning: Prefix caching in Mamba cache 'align' mode is currently enabled. Its support for Mamba layers is experimental. Please report any issues you may observe.
-(APIServer pid=1) INFO 07-28 07:53:48 [vllm.py:1118] Asynchronous scheduling is enabled.
-(APIServer pid=1) WARNING 07-28 07:53:48 [vllm.py:1172] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
-(APIServer pid=1) WARNING 07-28 07:53:48 [vllm.py:1222] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
-(APIServer pid=1) INFO 07-28 07:53:48 [kernel.py:306] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['xpu_kernels', 'native'], fused_add_rms_norm=['xpu_kernels', 'native'])
-(APIServer pid=1) INFO 07-28 07:53:48 [vllm.py:1401] Cudagraph is disabled under eager mode
-(APIServer pid=1) WARNING 07-28 07:53:48 [xpu.py:297] XPU Graph is disabled by environment variable, please set VLLM_XPU_ENABLE_XPU_GRAPH=1 to enable it.
 (APIServer pid=1) INFO 07-28 07:53:48 [xpu.py:357] XPU platform: set server shutdown_timeout=5.
 (APIServer pid=1) INFO 07-28 07:53:48 [compilation.py:329] Enabled custom fusions: norm_quant, act_quant
 (APIServer pid=1) [transformers] The `use_fast` parameter is deprecated and will be removed in a future version. Use `backend="torchvision"` instead of `use_fast=True`, or `backend="pil"` instead of `use_fast=False`.
