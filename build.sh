@@ -16,9 +16,6 @@ git clean -fdx
 curl -L "https://github.com/vllm-project/vllm/compare/main...yma11:vllm:docker-update.patch" -o docker.patch
 git apply docker.patch && NAME=${NAME}-p
 
-# 2. Embed-quantization patch (W4A16 AutoRound models: quantized embed_tokens on XPU)
-curl -L "https://raw.githubusercontent.com/marcinkuk/vllm-2xb50/main/qwen35-embed-quant.patch" -o qwen35-embed-quant.patch
-git apply qwen35-embed-quant.patch || NAME=${NAME}-noembed
 
 # 2. Embed-quantization patch (W4A16 AutoRound models: quantized embed_tokens on XPU)
 curl -L "https://raw.githubusercontent.com/marcinkuk/vllm-2xb50/main/qwen35-embed-quant.patch" -o qwen35-embed-quant.patch
