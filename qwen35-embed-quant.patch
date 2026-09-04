@@ -1,0 +1,26 @@
+diff --git a/vllm/model_executor/models/qwen3_5.py b/vllm/model_executor/models/qwen3_5.py
+index f991f05..fe96098 100644
+--- a/vllm/model_executor/models/qwen3_5.py
++++ b/vllm/model_executor/models/qwen3_5.py
+@@ -245,6 +245,8 @@ class Qwen3_5Model(Qwen3NextModel):
+         self.embed_tokens = VocabParallelEmbedding(
+             self.vocab_size,
+             config.hidden_size,
++            quant_config=self.quant_config,
++            prefix=maybe_prefix(prefix, "embed_tokens"),
+         )
+ 
+         def get_layer(prefix: str):
+diff --git a/vllm/model_executor/models/qwen3_5_mtp.py b/vllm/model_executor/models/qwen3_5_mtp.py
+index 4c064be..47fa506 100644
+--- a/vllm/model_executor/models/qwen3_5_mtp.py
++++ b/vllm/model_executor/models/qwen3_5_mtp.py
+@@ -84,6 +84,8 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
+         self.embed_tokens = VocabParallelEmbedding(
+             self.vocab_size,
+             config.hidden_size,
++            quant_config=quant_config,
++            prefix=maybe_prefix(prefix, "embed_tokens"),
+         )
+ 
+         # Workaround: mtp.fc is stored as BF16 in NVFP4 checkpoints but is
