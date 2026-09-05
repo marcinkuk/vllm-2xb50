@@ -21,6 +21,10 @@ git apply docker.patch && NAME=${NAME}-p
 curl -L "https://raw.githubusercontent.com/marcinkuk/vllm-2xb50/main/qwen35-embed-quant.patch" -o qwen35-embed-quant.patch
 git apply qwen35-embed-quant.patch || NAME=${NAME}-noembed
 
+# 3. MTP draft-vocab patch (after embed: vocab-truncated 40960-token MTP drafter head)
+curl -L "https://raw.githubusercontent.com/marcinkuk/vllm-2xb50/main/qwen35-mtp-draft-vocab.patch" -o qwen35-mtp-draft-vocab.patch
+git apply qwen35-mtp-draft-vocab.patch || NAME=${NAME}-nomtp
+
 docker build --cpuset-cpus="0" --memory="16g" --no-cache -f docker/Dockerfile.xpu -t vllm-intel-xpu:${NAME} .
 #docker build --cpuset-cpus="0" --memory="8g" -f docker/Dockerfile.xpu -t vllm-intel-xpu:${DATE}-${HASH} .
 #docker build --no-cache -f docker/Dockerfile.xpu -t vllm-intel-xpu:${DATE}-${HASH} .
