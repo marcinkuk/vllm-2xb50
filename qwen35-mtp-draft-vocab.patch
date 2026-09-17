@@ -1,36 +1,8 @@
-Enable the MTP drafter's vocab-truncated draft head (40960 tokens) for
-Qwen3.5 / Qwen3.8-27B W4A16-AutoRound checkpoints on XPU.
-
-Companion to qwen35-embed-quant.patch; apply it AFTER the embed patch.
-Without this patch the MTP drafter loads the full ~248k-row lm_head
-(7.2x the memory of the 40960-row draft head) even though the
-checkpoint only ships mtp.draft_lm_head.* for 40960 rows, so the
-draft head silently stays unpopulated and speculative decoding is
-degraded (draft quality ~ random over the full vocab).
-
-What it does:
-- Qwen3_5MultiTokenPredictor.__init__: if the checkpoint directory
-  contains mtp_draft_vocab_ids.pt (built by syvai's
-  build_draft_vocab.py), construct a 40960-row ParallelLMHead as
-  model.draft_lm_head and map checkpoint mtp.draft_lm_head.* weights
-  onto it in load_weights(). Set MTP_DRAFT_VOCAB=0 to disable.
-- compute_logits(): scores the 40960-row head, scatters logits back
-  to the full vocab (-inf for non-draft ids). Speculative decoding
-  stays exact: the target model still verifies full-vocab candidates,
-  only the drafter's proposal distribution changes.
-
-Apply from the installed vllm package directory:
-  patch -p1 -d venv/lib/python3.12/site-packages/vllm < qwen35-mtp-draft-vocab.patch
-or from a vllm checkout (vllm/ package dir):
-  cd vllm && git apply ../qwen35-mtp-draft-vocab.patch
-
-Validated: git apply --check clean on upstream vllm main (29af8bd,
-2026-07-30) and on Suppressor72/vllm fix/mamba-retention-eagle-boundary
-(74a6570), in both cases applied after qwen35-embed-quant.patch.
-
---- a/model_executor/models/qwen3_5_mtp.py
-+++ b/model_executor/models/qwen3_5_mtp.py
-@@ -88,6 +88,26 @@
+diff --git a/vllm/model_executor/models/qwen3_5_mtp.py b/vllm/model_executor/models/qwen3_5_mtp.py
+index d2d924c1cc..a759b91e56 100644
+--- a/vllm/model_executor/models/qwen3_5_mtp.py
++++ b/vllm/model_executor/models/qwen3_5_mtp.py
+@@ -89,6 +89,26 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
              prefix=maybe_prefix(prefix, "embed_tokens"),
          )
  
@@ -57,7 +29,7 @@ Validated: git apply --check clean on upstream vllm main (29af8bd,
          # Workaround: mtp.fc is stored as BF16 in NVFP4 checkpoints but is
          # missing from hf_quant_config.json exclude_modules. Force unquantized.
          # Ref: https://github.com/vllm-project/vllm/pull/38650
-@@ -255,6 +275,12 @@
+@@ -257,6 +277,12 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal, SupportsPP):
              self.lm_head = PPMissingLayer()
  
          self.logits_processor = LogitsProcessor(config.vocab_size)
@@ -68,9 +40,9 @@ Validated: git apply --check clean on upstream vllm main (29af8bd,
 +            else None
 +        )
  
-     def embed_input_ids(
-         self,
-@@ -301,11 +327,26 @@
+         self.make_empty_intermediate_tensors = (
+             self.model.make_empty_intermediate_tensors
+@@ -307,11 +333,26 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal, SupportsPP):
          hidden_states: torch.Tensor,
          spec_step_idx: int = 0,
      ) -> torch.Tensor | None:
