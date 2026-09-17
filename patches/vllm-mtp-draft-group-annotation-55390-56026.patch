@@ -1,0 +1,346 @@
+diff --git a/tests/v1/core/test_kv_cache_utils.py b/tests/v1/core/test_kv_cache_utils.py
+index 3c82180474..b7d508be90 100644
+--- a/tests/v1/core/test_kv_cache_utils.py
++++ b/tests/v1/core/test_kv_cache_utils.py
+@@ -4273,13 +4273,142 @@ def test_deepseek_v4_draft_group_annotated_on_packed_path():
+     assert "model.layers.3.self_attn.attn" in flagged[0].layer_names
+ 
+ 
+-def test_deepseek_v4_annotation_requires_model_type():
+-    # The positional rule is only sound for DeepseekV4, where the draft layer
+-    # is known to be registered last. Without that model gate nothing may be
+-    # flagged, however the grouping happens to fall out.
++def test_trailing_layer_fallback_applies_to_any_mtp_model():
++    # The positional rule is sound for every MTP drafter, not just DeepseekV4:
++    # MTP blocks reuse the target's decoder layer (no spec marker) and always
++    # register after every target layer. The model_type must not gate it.
+     groups = get_kv_cache_groups(
+         _spec_decode_grouping_config(method="mtp", model_type="other"),
+         _deepseek_v4_specs(),
+     )
+ 
++    flagged = [g for g in groups if g.is_eagle_group]
++    assert len(flagged) == 1
++    assert "model.layers.3.self_attn.attn" in flagged[0].layer_names
++
++
++def _qwen3_5_hybrid_specs(with_mtp_layer: bool):
++    """Qwen3.5-shaped hybrid: repeating [GDN x3, full-attn x1] blocks, with
++    the MTP drafter's full-attn layer (spec-identical to the target's)
++    registered last."""
++    specs = {}
++    idx = 0
++    for _ in range(2):
++        for _ in range(3):
++            specs[f"model.layers.{idx}.linear_attn"] = new_mamba_spec(
++                mamba_cache_mode="align"
++            )
++            idx += 1
++        specs[f"model.layers.{idx}.self_attn.attn"] = new_kv_cache_spec()
++        idx += 1
++    if with_mtp_layer:
++        specs["mtp.layers.0.self_attn.attn"] = new_kv_cache_spec()
++    return specs
++
++
++def test_qwen3_5_mtp_draft_group_annotated_on_hybrid_path(caplog_vllm):
++    # A hybrid mamba + full-attention model with an MTP drafter that is
++    # spec-indistinguishable from the target reaches the general multi-group
++    # path. The trailing-layer rule must locate the draft group there so the
++    # Mamba groups are not swept up by the flag-all consumer fallback.
++    groups = get_kv_cache_groups(
++        _spec_decode_grouping_config(method="mtp", model_type="qwen3_5"),
++        _qwen3_5_hybrid_specs(with_mtp_layer=True),
++    )
++
++    flagged = [g for g in groups if g.is_eagle_group]
++    assert len(flagged) == 1
++    assert "mtp.layers.0.self_attn.attn" in flagged[0].layer_names
++    for group in groups:
++        if any(
++            isinstance(spec, MambaSpec)
++            for spec in iter_layer_specs(group.kv_cache_spec)
++        ):
++            assert not group.is_eagle_group
++    assert "could be identified as the draft model's" not in caplog_vllm.text
++
++
++def test_non_mtp_eagle_hybrid_still_warns(caplog_vllm):
++    # An EAGLE head reuses the target's own "model." prefix, so no rule can
++    # tell its draft layers apart from the target's: nothing is flagged, the
++    # conservative all-groups fallback stays in place, and the unannotated
++    # Mamba groups must at least be visible via the warning.
++    groups = get_kv_cache_groups(
++        _spec_decode_grouping_config(method="eagle3", model_type="qwen3_5"),
++        _qwen3_5_hybrid_specs(with_mtp_layer=False),
++    )
++
+     assert not any(g.is_eagle_group for g in groups)
++    assert "could be identified as the draft model's" in caplog_vllm.text
++
++
++def test_trailing_layer_fallback_requires_exact_partition():
++    # If the groups do not partition the layers exactly (e.g. a caller that
++    # dropped or duplicated layers), the positional rule is meaningless and
++    # must not fire.
++    from vllm.v1.core.kv_cache_utils import _annotate_eagle_groups
++
++    specs = _qwen3_5_hybrid_specs(with_mtp_layer=True)
++    config = _spec_decode_grouping_config(method="mtp", model_type="qwen3_5")
++    groups = get_kv_cache_groups(config, specs)
++    for g in groups:
++        g.is_eagle_group = False
++    # Remove one layer from its group: no longer an exact partition.
++    trimmed = [
++        KVCacheGroupSpec(
++            [n for n in g.layer_names if n != "model.layers.0.linear_attn"],
++            g.kv_cache_spec,
++        )
++        for g in groups
++    ]
++    _annotate_eagle_groups(config, specs, trimmed, use_trailing_layer_fallback=True)
++
++    assert not any(g.is_eagle_group for g in trimmed)
++
++
++
++def test_annotate_eagle_groups_flags_separately_prefixed_drafter_layers():
++    """A drafter registered under its own module prefix after the target
++    (Qwen4ExpMTP under "mtp.") marks every group holding one of its layers as
++    a draft group; groups holding only target layers, such as the Mamba
++    groups, stay unflagged so they keep serving prefix hits."""
++    from unittest.mock import Mock
++
++    from vllm.v1.core.kv_cache_utils import _annotate_eagle_groups
++
++    attn = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
++    mamba = MambaSpec(shapes=((1, 1),), dtypes=(torch.float32,), block_size=16)
++    kv_cache_spec = {
++        "model.layers.0.attn": attn,
++        "model.layers.1.mamba": mamba,
++        "model.layers.2.attn": attn,
++        "mtp.mtp.layers.3.self_attn.attn": attn,
++    }
++    groups = [
++        KVCacheGroupSpec(["model.layers.1.mamba"], mamba),
++        KVCacheGroupSpec(["model.layers.0.attn", "model.layers.2.attn", "mtp.mtp.layers.3.self_attn.attn"], attn),
++    ]
++    vllm_config = Mock()
++    vllm_config.speculative_config.use_eagle_block_drop.return_value = True
++    _annotate_eagle_groups(vllm_config, kv_cache_spec, groups)
++    assert [g.is_eagle_group for g in groups] == [False, True]
++
++    # Same top-level prefix for every layer (an EAGLE head registered under
++    # "model."): nothing can be told apart, so nothing is flagged and the
++    # coordinator keeps its conservative all-groups fallback.
++    same_prefix_spec = {
++        "model.layers.0.attn": attn,
++        "model.layers.1.mamba": mamba,
++        "model.layers.2.attn": attn,
++    }
++    groups2 = [
++        KVCacheGroupSpec(["model.layers.1.mamba"], mamba),
++        KVCacheGroupSpec(["model.layers.0.attn", "model.layers.2.attn"], attn),
++    ]
++    _annotate_eagle_groups(vllm_config, same_prefix_spec, groups2)
++    assert [g.is_eagle_group for g in groups2] == [False, False]
++
++    # No block drop configured: untouched.
++    vllm_config.speculative_config.use_eagle_block_drop.return_value = False
++    _annotate_eagle_groups(vllm_config, kv_cache_spec, groups2)
++    assert [g.is_eagle_group for g in groups2] == [False, False]
+diff --git a/vllm/v1/core/kv_cache_utils.py b/vllm/v1/core/kv_cache_utils.py
+index 656765c896..47c6b3cec3 100644
+--- a/vllm/v1/core/kv_cache_utils.py
++++ b/vllm/v1/core/kv_cache_utils.py
+@@ -2117,63 +2117,89 @@ def _get_packed_kv_cache_groups(
+         vllm_config,
+         kv_cache_spec,
+         groups,
+-        use_deepseek_v4_fallback=_is_deepseek_v4_eagle(vllm_config),
++        use_trailing_layer_fallback=_uses_trailing_mtp_layers(vllm_config),
+     )
+     _warn_if_unannotated_eagle_mamba(vllm_config, groups)
+     return groups
+ 
+ 
+-def _is_deepseek_v4_eagle(vllm_config: VllmConfig) -> bool:
++def _uses_trailing_mtp_layers(vllm_config: VllmConfig) -> bool:
++    """Whether the drafter's KV layers can be located positionally.
++
++    MTP drafters (DeepseekV4, Qwen3.5/Qwen3-Next, ...) reuse the target's own
++    decoder-layer architecture, so their specs carry no draft marker, but they
++    always register their KV layers after every target layer. That makes the
++    trailing-layer rule applicable wherever the groups partition the layers of
++    ``kv_cache_spec`` exactly (checked separately by the annotator).
++    """
+     spec_config = vllm_config.speculative_config
+     if spec_config is None or not spec_config.use_eagle():
+         return False
+-    model_config = vllm_config.model_config
+-    return model_config is not None and model_config.hf_config.model_type in (
+-        "deepseek_v4",
+-        "deepseek_v41",
+-    )
++    return spec_config.method == "mtp"
++
++
++def _groups_partition_layers_exactly(
++    kv_cache_spec: dict[str, KVCacheSpec],
++    kv_cache_groups: list[KVCacheGroupSpec],
++) -> bool:
++    """Whether the groups cover every layer of ``kv_cache_spec`` exactly once.
++
++    The trailing-layer draft fallback is only meaningful when the last
++    registered layer is guaranteed to appear in exactly one group.
++    """
++    names = [name for group in kv_cache_groups for name in group.layer_names]
++    return len(names) == len(kv_cache_spec) and set(names) == set(kv_cache_spec)
+ 
+ 
+ def _annotate_eagle_groups(
+     vllm_config: VllmConfig,
+     kv_cache_spec: dict[str, KVCacheSpec],
+     kv_cache_groups: list[KVCacheGroupSpec],
+-    use_deepseek_v4_fallback: bool = False,
++    use_trailing_layer_fallback: bool = False,
+ ) -> None:
+     """Flag the KV cache groups that hold drafter attention layers.
+ 
+-    Two detection rules, in order of preference:
++    Detection rules, in order of preference; the first that identifies the
++    drafter wins:
+ 
+     1. Spec-driven. ``non_causal_multi_token_decode`` is declared on
+        MLAAttentionSpec and set by drafter attention layers that run a
+        non-causal multi-token decode (today only Kimi-K3 DSpark). It survives
+        MLAAttentionSpec.merge, so it still identifies a group after per-group
+-       spec merging, wherever grouping happens to land. It is sufficient but
+-       not necessary: a drafter whose spec is indistinguishable from the
+-       target's cannot be found this way.
+-    2. Model-scoped positional fallback for DeepseekV4/V4.1, whose MTP block
+-       reuses the target's own decoder layer and so carries no spec marker. Its
+-       draft attention layer is always the last registered layer, so flag whichever
+-       group holds it. This rule is only valid where the groups partition
+-       exactly the layers of ``kv_cache_spec``, which is true on the packed
+-       grouping path and not in general; other callers must leave
+-       ``use_deepseek_v4_fallback`` False. The caller gates this fallback on
+-       the configured model type.
+-       FIXME(yifan): avoid/generalize this hacky check.
++       spec merging, wherever grouping happens to land. Sufficient but not
++       necessary: a drafter whose spec is indistinguishable from the target's
++       cannot be found this way.
++    2. Trailing-layer positional fallback for MTP drafters (DeepseekV4,
++       Qwen3.5, ...), whose MTP block reuses the target's own decoder layer and
++       so carries no spec marker: flag whichever group holds the last
++       registered layer. Only valid where the groups partition exactly the
++       layers of ``kv_cache_spec`` (re-checked here). Callers gate it on
++       ``_uses_trailing_mtp_layers``; it is left dormant here because rule 3
++       subsumes it (a single trailing drafter layer is exactly what rule 3
++       flags). FIXME(yifan): avoid/generalize this hacky check.
++    3. Drafter-prefix fallback (runs whenever rules 1-2 identified nothing):
++       the last registered layer belongs to the drafter. If its top-level
++       module prefix differs from the target's (a separately built drafter,
++       e.g. Qwen3.5 / Qwen4Exp MTP under ``mtp.``), every group holding one of
++       those layers is a draft group, so the Mamba/GDN groups are *not* and
++       still serve prefix hits (PR #56026). If the last layer shares the
++       target's prefix (an EAGLE head registered under ``model.``) nothing can
++       be told apart, so nothing is flagged and consumers fall back to the
++       conservative all-groups behaviour and surface the warning below.
++       Positional, so gated on an exact partition.
+ 
+     Args:
+         vllm_config: Config supplying the speculative method, if any.
+         kv_cache_spec: The kv cache spec of each attention layer, in layer
+-            registration order. Only read by rule 2.
++            registration order.
+         kv_cache_groups: Groups to annotate in place.
+-        use_deepseek_v4_fallback: Enable rule 2 for a DeepseekV4/V4.1 packed
+-            group.
+-
++        use_trailing_layer_fallback: Enable rule 2. Rule 3 runs regardless.
+     """
+     spec_config = vllm_config.speculative_config
+     if spec_config is None or not spec_config.use_eagle_block_drop():
+         return
+ 
++    # 1. Spec-driven (Kimi-K3 DSpark, etc.).
+     for group in kv_cache_groups:
+         if any(
+             getattr(spec, "non_causal_multi_token_decode", False)
+@@ -2181,13 +2207,44 @@ def _annotate_eagle_groups(
+         ):
+             group.is_eagle_group = True
+ 
+-    if not use_deepseek_v4_fallback:
++    # 2. Trailing-layer positional fallback (opt-in for MTP drafters).
++    if use_trailing_layer_fallback and _groups_partition_layers_exactly(
++        kv_cache_spec, kv_cache_groups
++    ):
++        last_layer = next(reversed(kv_cache_spec))
++        for group in kv_cache_groups:
++            if last_layer in group.layer_names:
++                group.is_eagle_group = True
++                break
++
++    # A drafter was already identified (rules 1 or 2); stop here.
++    if any(group.is_eagle_group for group in kv_cache_groups):
++        return
++
++    # 3. Drafter-prefix fallback: the last registered layer is the drafter's.
++    #    Positional, so require an exact partition of kv_cache_spec.
++    if not _groups_partition_layers_exactly(kv_cache_spec, kv_cache_groups):
++        return
++    names = list(kv_cache_spec)
++    if len(names) < 2:
++        return
++    first_prefix = names[0].split(".", 1)[0]
++    drafter_prefix = names[-1].split(".", 1)[0]
++    if drafter_prefix == first_prefix:
++        # EAGLE head reuses the target's prefix: indistinguishable, so keep
++        # the conservative all-groups fallback (the warning surfaces it).
++        return
++    drafter_layers = {
++        name for name in names if name.split(".", 1)[0] == drafter_prefix
++    }
++    target_layers = [name for name in names if name not in drafter_layers]
++    if any(name.split(".", 1)[0] != first_prefix for name in target_layers):
++        # More than two module prefixes in registration order: ambiguous, so
++        # stay conservative.
+         return
+-    last_layer = next(reversed(kv_cache_spec))
+     for group in kv_cache_groups:
+-        if last_layer in group.layer_names:
++        if drafter_layers.intersection(group.layer_names):
+             group.is_eagle_group = True
+-            break
+ 
+ 
+ def _warn_if_unannotated_eagle_mamba(
+@@ -2202,7 +2259,11 @@ def _warn_if_unannotated_eagle_mamba(
+ 
+     """
+     spec_config = vllm_config.speculative_config
+-    if spec_config is None or not spec_config.use_eagle():
++    # The all-groups fallback only exists while the trailing-block drop is
++    # on (KVCacheManager receives use_eagle=use_eagle_block_drop()); with
++    # --speculative-config disable_eagle_block_drop no group is a draft group
++    # and reuse works, so there is nothing to warn about.
++    if spec_config is None or not spec_config.use_eagle_block_drop():
+         return
+     if any(group.is_eagle_group for group in kv_cache_groups):
+         return
+@@ -2352,7 +2413,12 @@ def get_kv_cache_groups(
+             aligned = replace(spec, block_size=new_bs, page_size_padded=common_page)
+             groups.append(KVCacheGroupSpec([name], aligned))
+ 
+-    _annotate_eagle_groups(vllm_config, kv_cache_spec, groups)
++    _annotate_eagle_groups(
++        vllm_config,
++        kv_cache_spec,
++        groups,
++        use_trailing_layer_fallback=_uses_trailing_mtp_layers(vllm_config),
++    )
+     _warn_if_unannotated_eagle_mamba(vllm_config, groups)
+     return groups
+ 
