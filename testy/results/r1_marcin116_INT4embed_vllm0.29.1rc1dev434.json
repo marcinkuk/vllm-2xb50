@@ -1,0 +1,39 @@
+{
+ "model": "Marcin116/Qwen3.8-27B-W4A16-AutoRound-fast-embed-int4 (r1, INT4-embed)",
+ "vllm_version": "0.29.1rc1.dev434+g27757dde0.d20260920",
+ "runs": [
+  {
+   "served_model_id": "Qwen3.8-27B",
+   "served_root": "Marcin116/Qwen3.8-27B-W4A16-AutoRound-fast-embed-int4",
+   "vllm_version": "0.29.1rc1.dev434+g27757dde0.d20260920",
+   "corpus_chars": 499397,
+   "tokens": 102016,
+   "tokens_scored": 101966,
+   "misses": 0,
+   "total_nll": 158327.44511742907,
+   "perplexity": 4.724432446420118,
+   "wall_seconds": 148.4
+  },
+  {
+   "served_model_id": "Qwen3.8-27B",
+   "served_root": "Marcin116/Qwen3.8-27B-W4A16-AutoRound-fast-embed-int4",
+   "vllm_version": "0.29.1rc1.dev434+g27757dde0.d20260920",
+   "corpus_chars": 499397,
+   "tokens": 102016,
+   "tokens_scored": 101966,
+   "misses": 0,
+   "total_nll": 158341.33498288767,
+   "perplexity": 4.7250760550815,
+   "wall_seconds": 148.5
+  }
+ ],
+ "avg_perplexity": 4.724754,
+ "r2_perplexity_same_vllm": 4.7135531065580665,
+ "r2_run_for_comparison": "testy/results/r2_born2bewild_INT8embed_vllm0.29.1rc1dev434.json",
+ "delta_vs_r2_pct": {
+  "run1": 0.231,
+  "run2": 0.244,
+  "avg": 0.238
+ },
+ "verdict": "niewymierzalna: avg delta 0.24% < progu 1% (PPL 4.7248 vs 4.7136); szum r1 vs r1 = 0.014% (0.0007 abs)"
+}
