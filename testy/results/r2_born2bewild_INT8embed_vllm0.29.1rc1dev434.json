@@ -1,0 +1,12 @@
+{
+ "served_model_id": "Qwen3.8-27B",
+ "served_root": "born2bewild/Qwen3.8-27B-W4A16-AutoRound-fast",
+ "vllm_version": "0.29.1rc1.dev434+g27757dde0.d20260920",
+ "corpus_chars": 499397,
+ "tokens": 102016,
+ "tokens_scored": 101966,
+ "misses": 0,
+ "total_nll": 158092.36883902442,
+ "perplexity": 4.7135531065580665,
+ "wall_seconds": 200.7
+}
