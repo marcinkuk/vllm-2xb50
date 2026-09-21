@@ -16,7 +16,7 @@
 #   is what the XPU-specific patches below supply:
 #     [6] getmem   : getMemoryInfo zero-free fallback on XPU        (#53990, open)
 #     [7] grammar  : keep grammar-bitmask copies on the right stream (#53997, open)
-#     [8] tritonar : TP=2 fused allreduce via Triton, opt-in flag   (#53989, open)
+#     [8] tritonar : TP=2 fused allreduce via Triton, opt-in flag   (upstream analog #54768, open)
 #     [9] memprof  : let the XPU worker profile + budget graph-capture
 #                    memory (was hard-excluded to CUDA-like platforms only)
 #     [9b] mtphitfix : MTP/EAGLE + GDN prefix-cache corruption fix
@@ -34,10 +34,13 @@
 #   creation hunks fails as an apparent "conflict" (false reject). `git clean -fdx`
 #   the tree first (or apply on a truly clean checkout) — the patch itself is fine.
 #
-# CROSS-REFERENCES (upstream tracking — all still OPEN as of 2026-09-20)
+# CROSS-REFERENCES (upstream tracking — all still OPEN as of 2026-09-21)
 #   #56917  "[Feature]: TP=2 graph capture + MTP speculative decoding crash on
 #            Arc B70 — fix already exists upstream, unmerged"  (== this stack)
-#   #53989 / #53990 / #53997  CySpiegel XPU PRs (covered by patches [8]/[6]/[7])
+#   #54768  "[XPU] Route small TP all-reduces to a Level Zero IPC kernel" —
+#            the open upstream analog of patch [8] tritonar. (Do not confuse
+#            with #53989, which is a different PR: fused QK-norm+RoPE+gate.)
+#   #53990 / #53997  CySpiegel XPU PRs (covered by patches [6]/[7])
 #   #57128  MTP/EAGLE + GDN prefix-cache corruption fix — covered by [9b]; the
 #            full PR rewrites stale base (sink_blocks / manager registry) so only
 #            the minimal find_longest_cache_hit hunk is adopted locally.
@@ -63,11 +66,11 @@
 # VALIDATED 2026-09-20: all 8 original patches strict `git apply` on
 #   vllm-project/vllm main @ 17e50b9b76 / 9679173788 (also 4868312); the 9th
 #   (mtphitfix) applies on all three plus on top of the 8-patch chain.
-#   RE-VALIDATED 2026-07-30: full 9-patch chain (incl. [9b] mtphitfix) strict
+#   RE-VALIDATED 2026-09-21: full 9-patch chain (incl. [9b] mtphitfix) strict
 #   `git apply` on current vllm main @ f05b88751, and [9b] alone also applies on
 #   27757dde02 / 9679173788 / 4868312. Upstream #57128 (source) and #53912 (bug)
 #   both still OPEN/unmerged, so [9b] remains required.
-#   RE-VALIDATED 2026-07-30 (again): full 9-patch chain strict `git apply` on
+#   RE-VALIDATED 2026-09-21 (again): full 9-patch chain strict `git apply` on
 #   newest vllm main @ 04c1f4a4079 (2026-09-21). The new commits since 8902dbb
 #   (04c1f4a4 ROCm SWA, 0b7f11a1 routed-experts aux output, 0aee727f CI) are
 #   ROCm/CI only -- no XPU/GDN/MTP/attention source changes, so none of [1]-[9b]
@@ -78,6 +81,13 @@
 #   fused_recurrent_gated_delta_rule_packed_decode Triton kernel, so
 #   #57565 (Mamba-SSU B70 tuned configs) does not accelerate this model.
 #   Runtime TP=2+MTP+graphs not yet canaried on real B50/B70 hardware.
+#   RE-VALIDATED 2026-09-21 (3rd): full 9-patch chain strict `git apply` on
+#   newest vllm main @ db7f1f67 (2026-09-21 12:55 UTC). The 4 commits since
+#   04c1f4a4 (7268f6e3 multimodal cache staleness, 15859bb3 structured-output
+#   test reorg, 82daf9f5 ROCm CI parity, db7f1f67 XPU CI Ray-UT deselect) touch
+#   no XPU/GDN/MTP/attention source — none of [1]-[9b] superseded. Upstream PR
+#   states re-checked: #54768 / #53990 / #53997 / #57128 / #57565 all still OPEN,
+#   issues #53912 / #56917 still OPEN.
 
 # 1. Hard reset to a clean state and pull the latest upstream code
 docker builder prune -a -f
@@ -132,8 +142,8 @@ curl -L "https://raw.githubusercontent.com/${V}/main/patches/xpu-grammar-bitmask
 git apply /tmp/grammar.patch || { echo "FATAL: xpu-grammar-bitmask-stream-fix patch no longer applies on ${HASH}"; exit 1; }
 NAME=${NAME}-grammar
 
-# 8. XPU Triton allreduce for TP=2 (CySpiegel #53989, open). Opt-in at runtime
-#    via VLLM_XPU_TRITON_ALLREDUCE=1; engages only for world_size == 2.
+# 8. XPU Triton allreduce for TP=2 (upstream analog #54768, open). Opt-in at
+#    runtime via VLLM_XPU_TRITON_ALLREDUCE=1; engages only for world_size == 2.
 curl -L "https://raw.githubusercontent.com/${V}/main/patches/xpu-triton-allreduce-tp2.patch" -o /tmp/tritonar.patch
 git apply /tmp/tritonar.patch || { echo "FATAL: xpu-triton-allreduce-tp2 patch no longer applies on ${HASH}"; exit 1; }
 NAME=${NAME}-tritonar
