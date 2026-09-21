@@ -39,6 +39,28 @@
 #   creation hunks fails as an apparent "conflict" (false reject). `git clean -fdx`
 #   the tree first (or apply on a truly clean checkout) — the patch itself is fine.
 #
+# ALLREDUCE TRANSPORTS ON THIS STACK (two distinct failure modes, different fixes)
+#   (a) oneCCL / Level-Zero IPC — the DEFAULT transport (dist.all_reduce). The
+#       07-28 FATAL crash was here: oneCCL zeMemOpenIpcHandle -> ZE_RESULT_ERROR_
+#       INVALID_ARGUMENT inside all_reduce; the engine died. Mitigations are the
+#       commented oneCCL env vars further down (CCL_ZE_CLOSE_IPC_WA, CCL_ZE_CACHE=0,
+#       CCL_TOPO_FABRIC_VERTEX_CONNECTION_CHECK=0, CCL_ATL_TRANSPORT=ofi, CCL_ZE_
+#       IPC_EXCHANGE=sockets, CCL_TOPO_P2P_ACCESS=0). These are the ones to tune
+#       if the FATAL oneCCL IPC crash resurfaces — NOT patch [8].
+#   (b) Triton symmetric-memory one-shot — OPTIONAL, patch [8], now gated on the
+#       envs-declared VLLM_XPU_TRITON_ALLREDUCE (off by default). The 09-21 error
+#       ("L0 error 45 in symm.rendezvous" + "XPU Triton all-reduce init failed;
+#       using oneCCL") is this path's init failing on the B50/B70 pair — it is
+#       NON-FATAL: the try/except falls back to oneCCL, so serving continues. Do
+#       NOT "fix" (b) with (a)'s oneCCL env vars; they are different transports.
+#   RECOMMENDATION: leave VLLM_XPU_TRITON_ALLREDUCE unset (off) until the
+#       symm.rendezvous L0 transport is verified working on a B50/B70 pair (it
+#       works where P2P + symm-mem are supported, e.g. some B70 configs); when
+#       on, it only takes over small 1024-aligned bf16 decode all-reduces and
+#       falls back to oneCCL for everything else. Rebuild with the new patch
+#       ([8] now declares the flag in vllm/envs.py, so the "Unknown env var"
+#       warning from the 09-21 log is gone either way).
+#
 # CROSS-REFERENCES (upstream tracking — all still OPEN as of 2026-09-21)
 #   #56917  "[Feature]: TP=2 graph capture + MTP speculative decoding crash on
 #            Arc B70 — fix already exists upstream, unmerged"  (== this stack)
