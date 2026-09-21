@@ -19,15 +19,30 @@
 #     [8] tritonar : TP=2 fused allreduce via Triton, opt-in flag   (#53989, open)
 #     [9] memprof  : let the XPU worker profile + budget graph-capture
 #                    memory (was hard-excluded to CUDA-like platforms only)
+#     [9b] mtphitfix : MTP/EAGLE + GDN prefix-cache corruption fix
+#                     (port of open upstream #57128; drop_eagle_block was
+#                     ignored, so a "hit" could reuse unverified draft Mamba
+#                     state — the silent-corruption root cause). NEW as of
+#                     the 2026-09-20 audit; apply AFTER the 8-patch chain.
 #
 # RUNTIME (set on the serving process, e.g. in the container entrypoint):
 #   VLLM_XPU_ENABLE_XPU_GRAPH=1     <- the switch that turns graphs ON
 #   VLLM_XPU_TRITON_ALLREDUCE=1     <- optional; enables the TP=2 Triton AR (patch [8])
 #
-# CROSS-REFERENCES (upstream tracking — all still OPEN as of 2026-09-19)
+# NOTE on patch [8] tritonar: it ADDS new files (xpu_triton_all_reduce.py etc).
+#   If a tree already carries those untracked files, `git apply` of the file-
+#   creation hunks fails as an apparent "conflict" (false reject). `git clean -fdx`
+#   the tree first (or apply on a truly clean checkout) — the patch itself is fine.
+#
+# CROSS-REFERENCES (upstream tracking — all still OPEN as of 2026-09-20)
 #   #56917  "[Feature]: TP=2 graph capture + MTP speculative decoding crash on
 #            Arc B70 — fix already exists upstream, unmerged"  (== this stack)
 #   #53989 / #53990 / #53997  CySpiegel XPU PRs (covered by patches [8]/[6]/[7])
+#   #57128  MTP/EAGLE + GDN prefix-cache corruption fix — covered by [9b]; the
+#            full PR rewrites stale base (sink_blocks / manager registry) so only
+#            the minimal find_longest_cache_hit hunk is adopted locally.
+#   #53912  "[Bug]: MTP + prefix caching corruption (empty/repeated output)" —
+#            the symptom #9b addresses on this exact config.
 #   imryanpurdy/Qwen3.8-27B-4x-Intel-B70s  — same model, MTP5 + graphs shipped,
 #            144 tok/s, bit-identical canary (docs/CAMPAIGN-2026-09-10-GRAPHS.md)
 #
@@ -40,12 +55,19 @@
 # Apply order matters: embed-quant [4] BEFORE mtp-vocab [5]; the XPU patches
 # [6]-[8] are independent of the MTP block but applied after it to match the
 # validated 8-patch flow (mtpeagle,vision,embed,mtpvocab,getmem,grammar,
-# tritonar,memprof). Every patch FAILS THE BUILD loudly if it no longer applies
-# (upstream drift); it never silently skips.
+# tritonar,memprof), with [9b] mtphitfix last (it touches
+# single_type_kv_cache_manager.py, which no earlier patch modifies). Every
+# patch FAILS THE BUILD loudly if it no longer applies (upstream drift); it
+# never silently skips.
 #
-# VALIDATED 2026-09-19: all 8 patches strict `git apply` on vllm-project/vllm
-#   main @ 5302d1fe40 (also on 4cc15f2121). Runtime TP=2+MTP+graphs not yet
-#   canaried on real B50/B70 hardware.
+# VALIDATED 2026-09-20: all 8 original patches strict `git apply` on
+#   vllm-project/vllm main @ 17e50b9b76 / 9679173788 (also 4868312); the 9th
+#   (mtphitfix) applies on all three plus on top of the 8-patch chain.
+#   RE-VALIDATED 2026-07-30: full 9-patch chain (incl. [9b] mtphitfix) strict
+#   `git apply` on current vllm main @ f05b88751, and [9b] alone also applies on
+#   27757dde02 / 9679173788 / 4868312. Upstream #57128 (source) and #53912 (bug)
+#   both still OPEN/unmerged, so [9b] remains required.
+#   Runtime TP=2+MTP+graphs not yet canaried on real B50/B70 hardware.
 
 # 1. Hard reset to a clean state and pull the latest upstream code
 docker builder prune -a -f
@@ -117,6 +139,21 @@ NAME=${NAME}-tritonar
 curl -L "https://raw.githubusercontent.com/${V}/main/patches/xpu-cudagraph-memory-profiling.patch" -o /tmp/memprof.patch
 git apply /tmp/memprof.patch || { echo "FATAL: xpu-cudagraph-memory-profiling patch no longer applies on ${HASH}"; exit 1; }
 NAME=${NAME}-graphmemprof
+
+# 9b. MTP/EAGLE prefix-cache corruption fix (port of upstream #57128, still open/dirty).
+#     In MambaManager.find_longest_cache_hit the drop_eagle_block flag was ACCEPTED
+#     but IGNORED, so under MTP/EAGLE speculative decoding a "hit" could reuse a Mamba
+#     state that still holds UNVERIFIED draft state from a rejected draft position.
+#     That is the silent-corruption root cause (symptom: empty or repeated-character
+#     output, issue #53912) — it bites exactly this config: GDN (mamba) prefix caching
+#     ON + MTP ON. Fix: when drop_eagle_block is set, skip only the FIRST (most
+#     recent) checkpoint the finder matches, then keep scanning for the next
+#     (older, committed) one — instead of blanking the whole search tail. Self-contained
+#     42-line change, verified to `git apply` on 9679173788 / 4868312 / 27757dde02 and
+#     on top of the 8-patch chain.
+curl -L "https://raw.githubusercontent.com/${V}/main/patches/xpu-mtp-prefix-hit-fix.patch" -o /tmp/mtp-hitfix.patch
+git apply /tmp/mtp-hitfix.patch || { echo "FATAL: xpu-mtp-prefix-hit-fix patch no longer applies on ${HASH}"; exit 1; }
+NAME=${NAME}-mtphitfix
 
 # 10. Build the XPU image (graphs-capable).
 docker build --cpuset-cpus="0" --memory="16g" --no-cache -f docker/Dockerfile.xpu -t vllm-intel-xpu:${NAME} .
