@@ -20,14 +20,16 @@ Three legs, so a failure tells you WHICH layer is broken:
         A throw here == the 09-21 L0 error; the transport's limit on this pair.
   leg2  symm:   one all_reduce through the mapped peer buffers (sum check).
 
-Run inside the XPU image with BOTH render nodes visible, e.g.:
+Run inside the XPU image with BOTH render nodes visible, e.g. (from the repo
+dir; the mount means no rebuild is needed for script edits):
 
   docker run --rm \
     --device /dev/dri/renderD128 --device /dev/dri/renderD129 \
     -e CCL_SYCL_ALLGATHERV_SIMPLE_THRESHOLD=1073741824 \
     -e CCL_SYCL_ALLREDUCE_SIMPLE_THRESHOLD=1073741824 \
+    -v "$PWD/testy/symm_rendezvous_test.py":/tmp/symm_test.py:ro \
     vllm-intel-xpu:TAG \
-    python /workspace/symm_rendezvous_test.py
+    python /tmp/symm_test.py
 
 Final line:
   RESULT: ONECCL_BASELINE_FAIL <exc> -> oneCCL is broken in THIS env; fix the
@@ -43,7 +45,7 @@ the patched module's own harness:
 
 Running it ALONGSIDE a live server (no downtime, no rebuild):
 
-  1) docker cp symm_rendezvous_test.py <container>:/tmp/symm_test.py
+  1) docker cp testy/symm_rendezvous_test.py <container>:/tmp/symm_test.py
   2) pick a lull (no long generation in flight on the server)
   3) docker exec -e MASTER_PORT=29617 <container> python /tmp/symm_test.py
 

@@ -149,3 +149,34 @@ git apply patches/vllm-mtp-draft-group-annotation-55390-56026.patch
 - **Applied by `build.sh` as step 1** (image tag gets `-mtpeagle`). Re-audit
   before each build: once **#55390 and #56026 are both merged**, delete this
   patch and the build.sh step — main will carry the fix natively.
+
+## Tests
+
+`testy/symm_rendezvous_test.py` — checks whether the torch symmetric-memory
+(Level-Zero) transport comes up on this GPU pair, i.e. whether the Triton
+one-shot all-reduce (patch [8], `VLLM_XPU_TRITON_ALLREDUCE=1`) can engage at
+all on B50/B70. Three legs: (0) oneCCL baseline, (1) `symm.rendezvous`
+(the 09-21 "L0 error 45" spot), (2) an all_reduce through the mapped peer
+buffers. Needs the `-tritonar` image; no model load, a few seconds.
+
+Run standalone (fresh container) or alongside the live server:
+
+```sh
+# standalone (fresh container, both render nodes, the compose's CCL_* env)
+docker run --rm \
+  --device /dev/dri/renderD128 --device /dev/dri/renderD129 \
+  -e CCL_SYCL_ALLGATHERV_SIMPLE_THRESHOLD=1073741824 \
+  -e CCL_SYCL_ALLREDUCE_SIMPLE_THRESHOLD=1073741824 \
+  -v "$PWD/testy/symm_rendezvous_test.py":/tmp/symm_test.py:ro \
+  vllm-intel-xpu:TAG python /tmp/symm_test.py
+
+# alongside the live server (no downtime; see the script's docstring for
+# the residual-risk note and the watch/restart procedure)
+docker cp testy/symm_rendezvous_test.py <container>:/tmp/symm_test.py
+docker exec -e MASTER_PORT=29617 <container> python /tmp/symm_test.py
+```
+
+Verdicts: `ONECCL_BASELINE_FAIL` = your env (not the transport) is broken;
+`SYMM_TRANSPORT_FAIL (<phase>)` = keep the flag off, oneCCL is your transport;
+`SYMM_TRANSPORT_OK` = the Triton path is viable, enable the flag at the next
+planned restart.
