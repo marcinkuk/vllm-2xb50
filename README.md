@@ -157,14 +157,19 @@ git apply patches/vllm-mtp-draft-group-annotation-55390-56026.patch
 one-shot all-reduce (patch [8], `VLLM_XPU_TRITON_ALLREDUCE=1`) can engage at
 all on B50/B70. Three legs: (0) oneCCL baseline, (1) `symm.rendezvous`
 (the 09-21 "L0 error 45" spot), (2) an all_reduce through the mapped peer
-buffers. Needs the `-tritonar` image; no model load, a few seconds.
+buffers. Works on ANY image: on a `-tritonar` one it drives the patched
+`OneShotAllReduce` (full fidelity, incl. the Triton kernel); on any other
+image it transparently falls back to the same `torch._symmetric_memory`
+calls the patch makes (leg 1 is identical either way — that's the part that
+matters for the transport verdict). No model load, a few seconds.
 
 Run standalone (fresh container) or alongside the live server:
 
 ```sh
 # standalone (fresh container, both render nodes, the compose's CCL_* env)
-# --entrypoint python overrides the image's ENTRYPOINT (vllm); the image
-# must be a -tritonar one (leg 1 imports the module patch [8] adds)
+# --entrypoint python overrides the image's ENTRYPOINT (vllm); the test
+# auto-detects: -tritonar image -> drives the patched OneShotAllReduce,
+# any other image -> torch-only transport probe (same leg-1 calls)
 docker run --rm \
   --device /dev/dri/renderD128 --device /dev/dri/renderD129 \
   -e CCL_SYCL_ALLGATHERV_SIMPLE_THRESHOLD=1073741824 \
@@ -181,6 +186,8 @@ docker exec -e MASTER_PORT=29617 --entrypoint python <container> /tmp/symm_test.
 ```
 
 Verdicts: `ONECCL_BASELINE_FAIL` = your env (not the transport) is broken;
-`SYMM_TRANSPORT_FAIL (<phase>)` = keep the flag off, oneCCL is your transport;
-`SYMM_TRANSPORT_OK` = the Triton path is viable, enable the flag at the next
-planned restart.
+`SYMM_TRANSPORT_FAIL (<phase>, via <vllm|torch>)` = keep the flag off, oneCCL
+is your transport; `SYMM_TRANSPORT_OK (via <vllm|torch>)` = the L0 transport
+is viable — on a `-tritonar` image you can enable `VLLM_XPU_TRITON_ALLREDUCE`
+at the next planned restart (a `SYMM_TRANSPORT_CORRUPT` line = buffers map
+but data is wrong; treat as FAIL).
