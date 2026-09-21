@@ -67,6 +67,16 @@
 #   `git apply` on current vllm main @ f05b88751, and [9b] alone also applies on
 #   27757dde02 / 9679173788 / 4868312. Upstream #57128 (source) and #53912 (bug)
 #   both still OPEN/unmerged, so [9b] remains required.
+#   RE-VALIDATED 2026-07-30 (again): full 9-patch chain strict `git apply` on
+#   newest vllm main @ 04c1f4a4079 (2026-09-21). The new commits since 8902dbb
+#   (04c1f4a4 ROCm SWA, 0b7f11a1 routed-experts aux output, 0aee727f CI) are
+#   ROCm/CI only -- no XPU/GDN/MTP/attention source changes, so none of [1]-[9b]
+#   was superseded. gpu_worker.py lost the enable_return_routed_experts block
+#   but patch [9] (graph mem-profiling, ~line 581) is in a separate region and
+#   still applies. GDN prefill backend resolves to Triton on XPU (CUDA-only
+#   fast paths in _resolve_gdn_prefill_backend); decode uses the FLA
+#   fused_recurrent_gated_delta_rule_packed_decode Triton kernel, so
+#   #57565 (Mamba-SSU B70 tuned configs) does not accelerate this model.
 #   Runtime TP=2+MTP+graphs not yet canaried on real B50/B70 hardware.
 
 # 1. Hard reset to a clean state and pull the latest upstream code
