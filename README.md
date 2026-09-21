@@ -163,17 +163,21 @@ Run standalone (fresh container) or alongside the live server:
 
 ```sh
 # standalone (fresh container, both render nodes, the compose's CCL_* env)
+# --entrypoint python overrides the image's ENTRYPOINT (vllm); the image
+# must be a -tritonar one (leg 1 imports the module patch [8] adds)
 docker run --rm \
   --device /dev/dri/renderD128 --device /dev/dri/renderD129 \
   -e CCL_SYCL_ALLGATHERV_SIMPLE_THRESHOLD=1073741824 \
   -e CCL_SYCL_ALLREDUCE_SIMPLE_THRESHOLD=1073741824 \
   -v "$PWD/testy/symm_rendezvous_test.py":/tmp/symm_test.py:ro \
-  vllm-intel-xpu:TAG python /tmp/symm_test.py
+  --entrypoint python vllm-intel-xpu:TAG /tmp/symm_test.py
 
 # alongside the live server (no downtime; see the script's docstring for
-# the residual-risk note and the watch/restart procedure)
+# the residual-risk note and the watch/restart procedure; --entrypoint
+# python is needed because exec uses the IMAGE's entrypoint, not the
+# container's compose override)
 docker cp testy/symm_rendezvous_test.py <container>:/tmp/symm_test.py
-docker exec -e MASTER_PORT=29617 <container> python /tmp/symm_test.py
+docker exec -e MASTER_PORT=29617 --entrypoint python <container> /tmp/symm_test.py
 ```
 
 Verdicts: `ONECCL_BASELINE_FAIL` = your env (not the transport) is broken;

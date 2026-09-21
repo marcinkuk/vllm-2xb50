@@ -28,8 +28,20 @@ dir; the mount means no rebuild is needed for script edits):
     -e CCL_SYCL_ALLGATHERV_SIMPLE_THRESHOLD=1073741824 \
     -e CCL_SYCL_ALLREDUCE_SIMPLE_THRESHOLD=1073741824 \
     -v "$PWD/testy/symm_rendezvous_test.py":/tmp/symm_test.py:ro \
+    --entrypoint python \
     vllm-intel-xpu:TAG \
-    python /tmp/symm_test.py
+    /tmp/symm_test.py
+
+Two gotchas:
+  * `--entrypoint python` is REQUIRED: these images set ENTRYPOINT to `vllm`
+    (the compose nulls it out with `entrypoint: []`). Without the override
+    you get "vllm: error: unrecognized arguments: /tmp/symm_test.py".
+  * the image must carry patch [8] tritonar (tag suffix `-tritonar`), because
+    leg 1 imports xpu_triton_all_reduce.OneShotAllReduce — a module that
+    patch [8] adds. An older image (pre-tritonar, e.g. a tag ending in
+    `-noembed-mtp`) fails leg 1 with ImportError: that is a wrong-image
+    verdict, NOT a transport verdict; leg 0 (oneCCL) does not depend on any
+    local patch.
 
 Final line:
   RESULT: ONECCL_BASELINE_FAIL <exc> -> oneCCL is broken in THIS env; fix the
@@ -47,7 +59,9 @@ Running it ALONGSIDE a live server (no downtime, no rebuild):
 
   1) docker cp testy/symm_rendezvous_test.py <container>:/tmp/symm_test.py
   2) pick a lull (no long generation in flight on the server)
-  3) docker exec -e MASTER_PORT=29617 <container> python /tmp/symm_test.py
+  3) docker exec -e MASTER_PORT=29617 --entrypoint python <container> /tmp/symm_test.py
+     (--entrypoint is needed here too: exec uses the IMAGE's entrypoint — vllm —
+      not the container's compose override)
 
 docker exec inherits the container's environment (your CCL_* vars) and the
 same render nodes, so leg 0 sees the exact server conditions. The test adds
