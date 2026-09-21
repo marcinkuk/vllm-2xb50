@@ -1,25 +1,29 @@
-From 886adf167 [Distributed][XPU] Add flag-gated Triton one-shot all-reduce for TP=2
+From 1790012060 on 2026-09-21 by vllm-2xb50 [XPU] Route small TP=2 all-reduces to a Triton one-shot kernel (envs-gated)
+
+ .../device_communicators/xpu_communicator.py       |  18 +-
+ .../device_communicators/xpu_triton_all_reduce.py  | 216 +++++++++++++++++++++
+ vllm/envs.py                                       |   7 +
+ 3 files changed, 240 insertions(+), 1 deletion(-)
 
 diff --git a/vllm/distributed/device_communicators/xpu_communicator.py b/vllm/distributed/device_communicators/xpu_communicator.py
-index 7ca132824..3bd48c256 100644
+index e094f6fd..73c4f2ca 100644
 --- a/vllm/distributed/device_communicators/xpu_communicator.py
 +++ b/vllm/distributed/device_communicators/xpu_communicator.py
-@@ -2,6 +2,8 @@
- # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
- 
- 
-+import os
-+
- import torch
+@@ -6,6 +6,7 @@ import torch
  import torch.distributed as dist
  from torch.distributed import ProcessGroup
-@@ -25,7 +27,19 @@ class XpuCommunicator(DeviceCommunicatorBase):
+ 
++from vllm import envs
+ from vllm.logger import init_logger
+ 
+ from .base_device_communicator import DeviceCommunicatorBase
+@@ -25,7 +26,19 @@ class XpuCommunicator(DeviceCommunicatorBase):
          super().__init__(
              cpu_group, device, device_group, unique_name, use_all2all=use_all2all
          )
 -        self.ca_comm: None = None
 +        self.ca_comm = None
-+        if os.environ.get("VLLM_XPU_TRITON_ALLREDUCE") == "1" and self.world_size == 2:
++        if envs.VLLM_XPU_TRITON_ALLREDUCE and self.world_size == 2:
 +            try:
 +                from .xpu_triton_all_reduce import OneShotAllReduce
 +
@@ -34,7 +38,7 @@ index 7ca132824..3bd48c256 100644
          if self.use_all2all:
              if self.all2all_backend in ("naive", "allgather_reducescatter"):
                  from .all2all import AgRsAll2AllManager
-@@ -46,6 +60,9 @@ class XpuCommunicator(DeviceCommunicatorBase):
+@@ -46,6 +59,9 @@ class XpuCommunicator(DeviceCommunicatorBase):
                  logger.info("Using AgRs manager on XPU device.")
  
      def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
@@ -46,7 +50,7 @@ index 7ca132824..3bd48c256 100644
          return output
 diff --git a/vllm/distributed/device_communicators/xpu_triton_all_reduce.py b/vllm/distributed/device_communicators/xpu_triton_all_reduce.py
 new file mode 100644
-index 000000000..4a2255e6b
+index 00000000..4a2255e6
 --- /dev/null
 +++ b/vllm/distributed/device_communicators/xpu_triton_all_reduce.py
 @@ -0,0 +1,216 @@
@@ -266,3 +270,28 @@ index 000000000..4a2255e6b
 +
 +    mp.set_start_method("spawn", force=True)
 +    mp.spawn(_worker, args=(2, 20000, 200000), nprocs=2, join=True)
+diff --git a/vllm/envs.py b/vllm/envs.py
+index 259c08e7..08f651f9 100755
+--- a/vllm/envs.py
++++ b/vllm/envs.py
+@@ -318,6 +318,7 @@ if TYPE_CHECKING:
+     VLLM_ELASTIC_EP_DRAIN_REQUESTS: bool = False
+     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool = True
+     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
++    VLLM_XPU_TRITON_ALLREDUCE: bool = False
+     VLLM_XPU_FORCE_N_CONTIG_WEIGHT: bool = False
+     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
+     VLLM_XPU_INC_WNA16_BACKEND: Literal["auto", "ark", "w4a16", "w4a8"] = "auto"
+@@ -2136,6 +2137,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
+     "VLLM_XPU_ENABLE_XPU_GRAPH": lambda: bool(
+         int(os.getenv("VLLM_XPU_ENABLE_XPU_GRAPH", "0"))
+     ),
++    # Route small TP=2 all-reduces through a Triton one-shot symmetric-memory
++    # kernel instead of oneCCL. Off by default; enable per-platform only after
++    # validating the symm.rendezvous L0 transport works on the given GPU pair.
++    "VLLM_XPU_TRITON_ALLREDUCE": lambda: bool(
++        int(os.getenv("VLLM_XPU_TRITON_ALLREDUCE", "0"))
++    ),
+     # Force N-contiguous weight layout for all XPU unquantized linears.
+     "VLLM_XPU_FORCE_N_CONTIG_WEIGHT": lambda: bool(
+         int(os.getenv("VLLM_XPU_FORCE_N_CONTIG_WEIGHT", "0"))

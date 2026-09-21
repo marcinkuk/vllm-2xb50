@@ -16,7 +16,12 @@
 #   is what the XPU-specific patches below supply:
 #     [6] getmem   : getMemoryInfo zero-free fallback on XPU        (#53990, open)
 #     [7] grammar  : keep grammar-bitmask copies on the right stream (#53997, open)
-#     [8] tritonar : TP=2 fused allreduce via Triton, opt-in flag   (upstream analog #54768, open)
+#     [8] tritonar : TP=2 fused allreduce via Triton, envs-gated flag
+#                    (upstream analog #54768, open). The flag
+#                    VLLM_XPU_TRITON_ALLREDUCE is now DECLARED in vllm/envs.py
+#                    (bool, default 0) and the gate reads envs.VLLM_XPU_TRITON_ALLREDUCE,
+#                    so enabling it no longer triggers vLLM's "Unknown env var"
+#                    warning and the flag participates in env validation.
 #     [9] memprof  : let the XPU worker profile + budget graph-capture
 #                    memory (was hard-excluded to CUDA-like platforms only)
 #     [9b] mtphitfix : MTP/EAGLE + GDN prefix-cache corruption fix
@@ -27,7 +32,7 @@
 #
 # RUNTIME (set on the serving process, e.g. in the container entrypoint):
 #   VLLM_XPU_ENABLE_XPU_GRAPH=1     <- the switch that turns graphs ON
-#   VLLM_XPU_TRITON_ALLREDUCE=1     <- optional; enables the TP=2 Triton AR (patch [8])
+#   VLLM_XPU_TRITON_ALLREDUCE=1     <- optional; enables the TP=2 Triton AR (patch [8]); declared env flag, off by default
 #
 # NOTE on patch [8] tritonar: it ADDS new files (xpu_triton_all_reduce.py etc).
 #   If a tree already carries those untracked files, `git apply` of the file-
@@ -88,6 +93,18 @@
 #   no XPU/GDN/MTP/attention source — none of [1]-[9b] superseded. Upstream PR
 #   states re-checked: #54768 / #53990 / #53997 / #57128 / #57565 all still OPEN,
 #   issues #53912 / #56917 still OPEN.
+#   RE-VALIDATED 2026-09-21 (4th): full 9-patch chain strict `git apply` on
+#   newest vllm main @ 4f145167 (2026-09-21 11:29 UTC). [8] tritonar was
+#   reworked to gate on envs.VLLM_XPU_TRITON_ALLREDUCE (flag now declared in
+#   vllm/envs.py: TYPE_CHECKING bool default 0 + environment_variables lambda)
+#   instead of a raw os.environ read, so the "Unknown env var:
+#   VLLM_XPU_TRITON_ALLREDUCE" warning is gone and the flag is validated. The
+#   symm.rendezvous L0 error (09-21, non-fatal, oneCCL fallback engaged) is
+#   transport-specific: on B50/B70 the Triton path can fail at init, so it stays
+#   OFF by default and is opt-in per hardware. PR states re-confirmed via GitHub
+#   API: #54768 (analog of [8]) / #53990 / #53997 / #57128 / #57565 / #55390 /
+#   #56026 all still OPEN/unmerged; issues #53912 / #56917 still OPEN. No patch
+#   superseded by upstream as of 4f145167.
 
 # 1. Hard reset to a clean state and pull the latest upstream code
 docker builder prune -a -f
@@ -143,7 +160,11 @@ git apply /tmp/grammar.patch || { echo "FATAL: xpu-grammar-bitmask-stream-fix pa
 NAME=${NAME}-grammar
 
 # 8. XPU Triton allreduce for TP=2 (upstream analog #54768, open). Opt-in at
-#    runtime via VLLM_XPU_TRITON_ALLREDUCE=1; engages only for world_size == 2.
+#    runtime via VLLM_XPU_TRITON_ALLREDUCE=1 (declared in vllm/envs.py, so no
+#    "unknown env var" warning); engages only for world_size == 2. If the
+#    symm.rendezvous L0 transport fails on your GPU pair it falls back to
+#    oneCCL automatically (init is wrapped in try/except), so enabling it is
+#    safe to leave ON.
 curl -L "https://raw.githubusercontent.com/${V}/main/patches/xpu-triton-allreduce-tp2.patch" -o /tmp/tritonar.patch
 git apply /tmp/tritonar.patch || { echo "FATAL: xpu-triton-allreduce-tp2 patch no longer applies on ${HASH}"; exit 1; }
 NAME=${NAME}-tritonar
