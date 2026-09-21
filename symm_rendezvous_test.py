@@ -40,6 +40,23 @@ For the full answer (correctness + latency vs oneCCL, 20k+200k iters) instead ru
 the patched module's own harness:
 
   python -m vllm.distributed.device_communicators.xpu_triton_all_reduce
+
+Running it ALONGSIDE a live server (no downtime, no rebuild):
+
+  1) docker cp symm_rendezvous_test.py <container>:/tmp/symm_test.py
+  2) pick a lull (no long generation in flight on the server)
+  3) docker exec -e MASTER_PORT=29617 <container> python /tmp/symm_test.py
+
+docker exec inherits the container's environment (your CCL_* vars) and the
+same render nodes, so leg 0 sees the exact server conditions. The test adds
+only a few MB and a few small kernels for a few seconds; it uses its own
+process group and port, so it does not touch the server's.
+Residual risk: the 07-28 crash was a level-zero IPC driver bug, and leg 1
+does a second L0 IPC exchange while the server is busy. Low probability, but
+watch `docker logs -f <container>` during the run: if you see
+zeMemOpenIpcHandle / L0 errors in the SERVER log, abort, `docker restart
+<container>` (restart: unless-stopped covers it; KV cache is lost, agents
+reconnect), and keep VLLM_XPU_TRITON_ALLREDUCE=0.
 """
 import os
 import sys
