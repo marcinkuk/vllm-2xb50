@@ -37,7 +37,9 @@ Run inside the XPU image with BOTH render nodes visible (a few seconds; no
 model load). From the repo dir (the mount means no rebuild for script edits):
 
   docker run --rm \
+    --ipc host \
     --device /dev/dri/renderD128 --device /dev/dri/renderD129 \
+    -v /dev/dri/by-path:/dev/dri/by-path \
     -e CCL_SYCL_ALLGATHERV_SIMPLE_THRESHOLD=1073741824 \
     -e CCL_SYCL_ALLREDUCE_SIMPLE_THRESHOLD=1073741824 \
     -v "$PWD/testy/symm_rendezvous_test.py":/tmp/symm_test.py:ro \
@@ -45,10 +47,16 @@ model load). From the repo dir (the mount means no rebuild for script edits):
     vllm-intel-xpu:TAG \
     /tmp/symm_test.py
 
-Two gotchas:
+Three gotchas:
   * `--entrypoint python` is REQUIRED: these images set ENTRYPOINT to `vllm`
     (the compose nulls it out with `entrypoint: []`). Without the override you
     get "vllm: error: unrecognized arguments: /tmp/symm_test.py".
+  * `-v /dev/dri/by-path:/dev/dri/by-path` (and `--ipc host`) are REQUIRED:
+    oneCCL's ze_fd_manager opens /dev/dri/by-path to enumerate the GPUs.
+    Without it you get "init_device_fds ... could not open device directory"
+    at the first collective -> leg 0 fails with ONECCL_BASELINE_FAIL and you
+    never reach the transport. (The test now checks this up front and tells
+    you so instead of dying in oneCCL.)
   * any image works for the TRANSPORT verdict, but to exercise the actual
     Triton one-shot kernel (leg2 via OneShotAllReduce) the image must carry
     patch [8] (tag suffix `-tritonar`); a pre-tritonar image transparently
@@ -56,7 +64,8 @@ Two gotchas:
 
 Final line (the "via ..." part says which variant ran):
   RESULT: ONECCL_BASELINE_FAIL <exc> -> oneCCL is broken in THIS env; fix the
-      env (compose vars / CCL settings) and re-run before judging the transport
+      env (compose vars / CCL settings / by-path mount) and re-run before
+      judging the transport
   RESULT: SYMM_TRANSPORT_FAIL (<phase>, via <variant>) <exc> -> oneCCL works,
       L0 symm doesn't: keep VLLM_XPU_TRITON_ALLREDUCE=0 and use oneCCL with
       your CCL_* mitigations
@@ -73,10 +82,11 @@ Running it ALONGSIDE a live server (no downtime, no rebuild):
      (--entrypoint is needed here too: exec uses the IMAGE's entrypoint — vllm —
       not the container's compose override)
 
-docker exec inherits the container's environment (your CCL_* vars) and the
-same render nodes, so leg 0 sees the exact server conditions. The test adds
-only a few MB and a few small kernels for a few seconds; it uses its own
-process group and port, so it does not touch the server's.
+docker exec inherits the container's environment (your CCL_* vars, the
+by-path mount) and the same render nodes, so leg 0 sees the exact server
+conditions — this variant is the one that most closely mirrors production.
+The test adds only a few MB and a few small kernels for a few seconds; it
+uses its own process group and port, so it does not touch the server's.
 Residual risk: the 07-28 crash was a level-zero IPC driver bug, and leg 1
 does a second L0 IPC exchange while the server is busy. Low probability, but
 watch `docker logs -f <container>` during the run: if you see
@@ -100,8 +110,28 @@ _TORCH_SLOT_ELEMS = 2 * 64 * 1024  # 128K bf16 elems = 256 KiB per rank
 _TORCH_FLAG_ELEMS = 16
 
 
+def _preflight_by_path() -> None:
+    """Fail fast with a clear hint if /dev/dri/by-path is not mounted.
+
+    oneCCL's ze_fd_manager opens this directory to enumerate the GPUs; without
+    it the first collective dies with an opaque "init_device_fds ... could not
+    open device directory" that looks like a transport failure but is a mount
+    problem (the compose mounts it via `volumes: - /dev/dri/by-path`).
+    We only require the top-level dir to exist (that is what oneCCL's opendir
+    needs); the entries are symlinks to ../renderD128 etc., not subdirs, so we
+    must NOT isdir() them.
+    """
+    if not os.path.isdir("/dev/dri/by-path"):
+        raise RuntimeError(
+            "/dev/dri/by-path is not mounted inside this container; oneCCL "
+            "cannot enumerate the GPUs. Add to the docker run: "
+            "-v /dev/dri/by-path:/dev/dri/by-path  (and --ipc host, as in the compose)."
+        )
+
+
 def _oneccl_baseline(rank: int, dev) -> None:
     """Leg 0: prove XCCL collectives work in this env before judging symm."""
+    _preflight_by_path()
     t = torch.full((8192,), 1.0, dtype=torch.bfloat16, device=dev)
     dist.all_reduce(t)
     if not torch.allclose(t, torch.full_like(t, 2.0)):

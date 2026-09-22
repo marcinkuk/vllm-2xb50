@@ -170,8 +170,13 @@ Run standalone (fresh container) or alongside the live server:
 # --entrypoint python overrides the image's ENTRYPOINT (vllm); the test
 # auto-detects: -tritonar image -> drives the patched OneShotAllReduce,
 # any other image -> torch-only transport probe (same leg-1 calls)
+# --ipc host + the by-path mount mirror the compose: oneCCL's ze_fd_manager
+# opens /dev/dri/by-path to enumerate GPUs (missing = ONECCL_BASELINE_FAIL
+# "could not open device directory")
 docker run --rm \
+  --ipc host \
   --device /dev/dri/renderD128 --device /dev/dri/renderD129 \
+  -v /dev/dri/by-path:/dev/dri/by-path \
   -e CCL_SYCL_ALLGATHERV_SIMPLE_THRESHOLD=1073741824 \
   -e CCL_SYCL_ALLREDUCE_SIMPLE_THRESHOLD=1073741824 \
   -v "$PWD/testy/symm_rendezvous_test.py":/tmp/symm_test.py:ro \
