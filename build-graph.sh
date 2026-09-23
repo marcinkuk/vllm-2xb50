@@ -145,6 +145,28 @@
 #         kernel file xpu_triton_all_reduce.py and the envs.py flag
 #         (VLLM_XPU_TRITON_ALLREDUCE: bool=False, off by default) are unchanged.
 #         Runtime behavior identical: opt-in, TP=2 only, try/except -> oneCCL.
+#   RE-VALIDATED 2026-09-23 (audit of a real failure): a build run that printed
+#   "FATAL: mtpeagle (55390+56026) patch no longer applies on 6dc34b6334" came
+#   from a STALE pre-split copy of this script (the combined 55390+56026 patch).
+#   Re-running the CURRENT script re-fetches the split
+#   0001-56026-on-current-main.patch, which applies clean on 6dc34b6334 and on
+#   every newer main — no code change needed for that FATAL. The audit also
+#   pinned two base-era requirements that are now enforced up front by the
+#   gate in step 1b, so an out-of-era base fails with an actionable message:
+#     (a) the 56026 patch's two files match main blob-for-blob from the #55390
+#         merge (0bce411a, 2026-09-22) through 8b660ce96 (2026-09-23); the
+#         patch is the #56026 delta ON TOP of #55390, so main must carry
+#         _uses_trailing_mtp_layers() in vllm/v1/core/kv_cache_utils.py.
+#     (b) [8] tritonar was re-hunked onto the VLLM_BATCH_INVARIANT guard that
+#         #55881 (e4340e41c) introduced at the top of
+#         xpu_communicator.all_reduce(); on bases BEFORE that commit the
+#         xpu_communicator.py hunk fails (the new-file/envs hunks are fine).
+#         The user's 6dc34b6334 base is exactly such a base (it predates
+#         e4340e41c): there [8] would have been the NEXT failure after [2].
+#   Full 9-patch chain strict `git apply` re-verified clean on current
+#   vllm main @ 8b660ce96 (2026-09-23 14:16 UTC). PR states re-checked:
+#   #55390 MERGED, #56026 still OPEN; #54768 / #53990 / #53997 / #57128 still
+#   OPEN. All 9 raw.githubusercontent.com patch URLs live (HTTP 200).
 
 # 1. Hard reset to a clean state and pull the latest upstream code
 docker builder prune -a -f
@@ -161,6 +183,36 @@ DATE=$(date +%Y-%m-%d_%H-%M)
 NAME=${DATE}-${HASH}
 V=marcinkuk/vllm-2xb50   # this repo — single source of the patches
 
+# 1b. Base-era gate: the 9 patches are re-hunked for a specific upstream era, so
+#     check the base's era BEFORE trying to apply anything, and fail with an
+#     actionable message instead of a cryptic per-patch "patch does not apply".
+#     (This is the "patch no longer applies" guard, made specific.)
+#     Verified window: 56026 files match blob-for-blob from the #55390 merge
+#     (0bce411a, 2026-09-22) through 8b660ce96 (2026-09-23 14:16 UTC).
+era_ok=1
+for marker in \
+  "vllm/v1/core/kv_cache_utils.py:_uses_trailing_mtp_layers" \
+  "vllm/distributed/device_communicators/xpu_communicator.py:VLLM_BATCH_INVARIANT"; do
+  f="${marker%%:*}"; pat="${marker##*:}"
+  if ! git grep -q "$pat" -- "$f"; then
+    era_ok=0
+    if [ "$f" = "vllm/v1/core/kv_cache_utils.py" ]; then
+      echo "NOTE: base ${HASH} predates the #55390 merge (0bce411a, 2026-09-22)."
+    else
+      echo "NOTE: base ${HASH} predates #55881 (e4340e41c, VLLM_BATCH_INVARIANT guard)."
+    fi
+  fi
+done
+if [ "$era_ok" != 1 ]; then
+  echo "FATAL: base ${HASH} is outside the verified patch era (needs main at/after"
+  echo "       e4340e41c, 2026-09-22). Fix: 'git fetch origin && git reset --hard"
+  echo "       origin/main' and re-run. Known-good main for this patch set:"
+  echo "       bc162b3f9 (2026-09-22) .. 8b660ce96 (2026-09-23, verified)."
+  echo "       If you MUST build on ${HASH}: the 8-patch chain minus [8] tritonar"
+  echo "       still applies; re-hunk [8] for the older all_reduce() first."
+  exit 1
+fi
+
 # 2. MTP separately-prefixed-drafter KV-group fix (#56026, still open). NOTE:
 #    this used to be the COMBINED 55390+56026 patch, but #55390 (Mamba+EAGLE
 #    positional draft-grouping) is now MERGED upstream (2026-09-22), so only the
@@ -169,7 +221,13 @@ V=marcinkuk/vllm-2xb50   # this repo — single source of the patches
 #    warning on use_eagle_block_drop(). Standalone git-format patch; re-hunked
 #    onto current main c961121519 (2026-09-23).
 curl -L "https://raw.githubusercontent.com/${V}/main/patches/0001-56026-on-current-main.patch" -o /tmp/mtpeagle.patch
-git apply /tmp/mtpeagle.patch || { echo "FATAL: 56026 patch no longer applies on ${HASH}"; exit 1; }
+git apply /tmp/mtpeagle.patch || { echo "FATAL: 56026 patch no longer applies on ${HASH}."; \
+  echo "       The 56026 patch is the #56026 delta ON TOP of merged #55390 (0bce411a);" \
+  echo "       its two files (kv_cache_utils.py, test_kv_cache_utils.py) must match main" \
+  echo "       blob-for-blob, verified for 0bce411a .. 8b660ce96. Upstream drift:" \
+  echo "       re-hunk the patch onto current main (update the 'index' hashes) and" \
+  echo "       re-run. (If you saw 'mtpeagle (55390+56026)' here, your script copy is" \
+  echo "       stale — pull this repo and re-run; #55390 is merged, patch is split.)"; exit 1; }
 NAME=${NAME}-mtpeagle
 
 # 3. Vision-tower CPU offload (VLLM_VISION_CPU_OFFLOAD_GB). Not upstream.
@@ -215,7 +273,11 @@ NAME=${NAME}-grammar
 #    (old import hunk dropped) and whose all_reduce() opens with a
 #    VLLM_BATCH_INVARIANT guard (fast-path inserted after it). See header.
 curl -L "https://raw.githubusercontent.com/${V}/main/patches/xpu-triton-allreduce-tp2.patch" -o /tmp/tritonar.patch
-git apply /tmp/tritonar.patch || { echo "FATAL: xpu-triton-allreduce-tp2 patch no longer applies on ${HASH}"; exit 1; }
+git apply /tmp/tritonar.patch || { echo "FATAL: xpu-triton-allreduce-tp2 patch no longer applies on ${HASH}."; \
+  echo "       If 'xpu_communicator.py: patch does not apply' is the cause, the base" \
+  echo "       predates the VLLM_BATCH_INVARIANT guard (#55881, e4340e41c) that this" \
+  echo "       re-hunk anchors on. Fix: build on main at/after e4340e41c (current main" \
+  echo "       qualifies); the new-file + envs.py hunks are era-independent."; exit 1; }
 NAME=${NAME}-tritonar
 
 # 9. XPU CUDA-graph memory profiling (net-new; enables graphs to be budgeted).
