@@ -1,23 +1,30 @@
-From 1790012060 on 2026-09-21 by vllm-2xb50 [XPU] Route small TP=2 all-reduces to a Triton one-shot kernel (envs-gated)
+From vllm-2xb50 on 2026-09-23 by vllm-2xb50 [XPU] Route small TP=2 all-reduces to a Triton one-shot kernel (envs-gated) [RE-HUNKED for main c961121519]
+Subject: [PATCH] [XPU] TP=2 Triton one-shot all-reduce (VLLM_XPU_TRITON_ALLREDUCE, off by default)
 
- .../device_communicators/xpu_communicator.py       |  18 +-
- .../device_communicators/xpu_triton_all_reduce.py  | 216 +++++++++++++++++++++
- vllm/envs.py                                       |   7 +
- 3 files changed, 240 insertions(+), 1 deletion(-)
+RE-HUNKED 2026-09-23 onto vllm main c961121519. The original patch pre-dated
+two upstream drift points in xpu_communicator.py:
+  1. upstream now already imports `vllm.envs as envs` at the top (the old
+     hunk that added `from vllm import envs` is now redundant -> dropped);
+  2. upstream all_reduce() now opens with a VLLM_BATCH_INVARIANT / _fixed_rank_sum
+     guard, so the Triton fast-path is inserted AFTER that guard (new
+     pre-image) instead of directly before `output = input_.clone()`.
+The OneShotAllReduce kernel file (xpu_triton_all_reduce.py) and the envs.py
+flag (VLLM_XPU_TRITON_ALLREDUCE: bool=False, off by default) are unchanged
+and still apply verbatim. Runtime behavior is identical: opt-in flag, TP=2
+only, try/except init -> falls back to oneCCL on L0 symm failure.
+---
+
+ .../device_communicators/xpu_communicator.py            | 17 ++++++++++++++++-
+ vllm/envs.py                                            |  7 +++++++
+ 2 files changed, 23 insertions(+), 1 deletion(-)
+ .../device_communicators/xpu_triton_all_reduce.py  | 216 +
+ 223 insertions(+)
 
 diff --git a/vllm/distributed/device_communicators/xpu_communicator.py b/vllm/distributed/device_communicators/xpu_communicator.py
-index e094f6fd..73c4f2ca 100644
+index 7a5913754f..6e67f8b322 100644
 --- a/vllm/distributed/device_communicators/xpu_communicator.py
 +++ b/vllm/distributed/device_communicators/xpu_communicator.py
-@@ -6,6 +6,7 @@ import torch
- import torch.distributed as dist
- from torch.distributed import ProcessGroup
- 
-+from vllm import envs
- from vllm.logger import init_logger
- 
- from .base_device_communicator import DeviceCommunicatorBase
-@@ -25,7 +26,19 @@ class XpuCommunicator(DeviceCommunicatorBase):
+@@ -26,7 +26,19 @@ class XpuCommunicator(DeviceCommunicatorBase):
          super().__init__(
              cpu_group, device, device_group, unique_name, use_all2all=use_all2all
          )
@@ -38,19 +45,45 @@ index e094f6fd..73c4f2ca 100644
          if self.use_all2all:
              if self.all2all_backend in ("naive", "allgather_reducescatter"):
                  from .all2all import AgRsAll2AllManager
-@@ -46,6 +59,9 @@ class XpuCommunicator(DeviceCommunicatorBase):
-                 logger.info("Using AgRs manager on XPU device.")
+@@ -65,6 +77,9 @@ class XpuCommunicator(DeviceCommunicatorBase):
+             # and accumulate in rank order, independent of the token batch.
+             return self._fixed_rank_sum(input_)
  
-     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
 +        ca = self.ca_comm
 +        if ca is not None and ca.should_custom_ar(input_):
 +            return ca.all_reduce(input_)
          output = input_.clone()
          dist.all_reduce(output, group=self.device_group)
          return output
+diff --git a/vllm/envs.py b/vllm/envs.py
+index 30b3de8d64..b61155b9b9 100755
+--- a/vllm/envs.py
++++ b/vllm/envs.py
+@@ -318,6 +318,7 @@ if TYPE_CHECKING:
+     VLLM_ELASTIC_EP_DRAIN_REQUESTS: bool = False
+     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool = True
+     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
++    VLLM_XPU_TRITON_ALLREDUCE: bool = False
+     VLLM_XPU_FORCE_N_CONTIG_WEIGHT: bool = False
+     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
+     VLLM_XPU_INC_WNA16_BACKEND: Literal["auto", "ark", "w4a16", "w4a8"] = "auto"
+@@ -2143,6 +2144,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
+     "VLLM_XPU_ENABLE_XPU_GRAPH": lambda: bool(
+         int(os.getenv("VLLM_XPU_ENABLE_XPU_GRAPH", "0"))
+     ),
++    # Route small TP=2 all-reduces through a Triton one-shot symmetric-memory
++    # kernel instead of oneCCL. Off by default; enable per-platform only after
++    # validating the symm.rendezvous L0 transport works on the given GPU pair.
++    "VLLM_XPU_TRITON_ALLREDUCE": lambda: bool(
++        int(os.getenv("VLLM_XPU_TRITON_ALLREDUCE", "0"))
++    ),
+     # Force N-contiguous weight layout for all XPU unquantized linears.
+     "VLLM_XPU_FORCE_N_CONTIG_WEIGHT": lambda: bool(
+         int(os.getenv("VLLM_XPU_FORCE_N_CONTIG_WEIGHT", "0"))
+
 diff --git a/vllm/distributed/device_communicators/xpu_triton_all_reduce.py b/vllm/distributed/device_communicators/xpu_triton_all_reduce.py
 new file mode 100644
-index 00000000..4a2255e6
+index 00000000..4a2255e6b15ac60936f4061dc85e79b731ea98b1 100644
 --- /dev/null
 +++ b/vllm/distributed/device_communicators/xpu_triton_all_reduce.py
 @@ -0,0 +1,216 @@
@@ -270,28 +303,3 @@ index 00000000..4a2255e6
 +
 +    mp.set_start_method("spawn", force=True)
 +    mp.spawn(_worker, args=(2, 20000, 200000), nprocs=2, join=True)
-diff --git a/vllm/envs.py b/vllm/envs.py
-index 259c08e7..08f651f9 100755
---- a/vllm/envs.py
-+++ b/vllm/envs.py
-@@ -318,6 +318,7 @@ if TYPE_CHECKING:
-     VLLM_ELASTIC_EP_DRAIN_REQUESTS: bool = False
-     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool = True
-     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
-+    VLLM_XPU_TRITON_ALLREDUCE: bool = False
-     VLLM_XPU_FORCE_N_CONTIG_WEIGHT: bool = False
-     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
-     VLLM_XPU_INC_WNA16_BACKEND: Literal["auto", "ark", "w4a16", "w4a8"] = "auto"
-@@ -2136,6 +2137,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
-     "VLLM_XPU_ENABLE_XPU_GRAPH": lambda: bool(
-         int(os.getenv("VLLM_XPU_ENABLE_XPU_GRAPH", "0"))
-     ),
-+    # Route small TP=2 all-reduces through a Triton one-shot symmetric-memory
-+    # kernel instead of oneCCL. Off by default; enable per-platform only after
-+    # validating the symm.rendezvous L0 transport works on the given GPU pair.
-+    "VLLM_XPU_TRITON_ALLREDUCE": lambda: bool(
-+        int(os.getenv("VLLM_XPU_TRITON_ALLREDUCE", "0"))
-+    ),
-     # Force N-contiguous weight layout for all XPU unquantized linears.
-     "VLLM_XPU_FORCE_N_CONTIG_WEIGHT": lambda: bool(
-         int(os.getenv("VLLM_XPU_FORCE_N_CONTIG_WEIGHT", "0"))

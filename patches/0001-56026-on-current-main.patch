@@ -1,0 +1,191 @@
+From 70b756d67f000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Windless84 <15976122+Windless84@users.noreply.github.com>
+Date: Wed, 9 Sep 2026 02:53:01 -0400
+Subject: [PATCH] Identify a separately prefixed drafter's KV groups; warn about the all-groups draft fallback only when the block drop is on
+
+Qwen4ExpMTP registers its attention layers under "mtp." after the target's
+"model." layers, but no group carried a spec marker and the DeepseekV4
+positional fallback is model-gated, so _annotate_eagle_groups flagged nothing,
+the coordinator treated every KV group as a draft group and Mamba groups
+could never serve a prefix hit (kv_cache_utils.py:1893 warning; zero hits
+across a full replay). Flag every group holding a layer under the drafter's
+distinct top-level prefix; drafters sharing the target's prefix keep the old
+conservative fallback. The warning now keys on use_eagle_block_drop(), which
+is what KVCacheManager actually receives.
+
+Signed-off-by: Windless84 <15976122+Windless84@users.noreply.github.com>
+(cherry picked from commit 4a365dee4aed8ae3135213b4cf6ce04f6d82e756)
+(rebased onto vllm main c961121519 - 2026-09-23; #55390 is now merged upstream,
+ so this patch carries ONLY the #56026 delta on top of current main)
+---
+ tests/v1/core/test_kv_cache_utils.py | 54 +++++++++++++++++++++++++++
+ vllm/v1/core/kv_cache_utils.py       | 71 ++++++++++++++++++++++++++++++------
+ 2 files changed, 113 insertions(+), 12 deletions(-)
+
+diff --git a/tests/v1/core/test_kv_cache_utils.py b/tests/v1/core/test_kv_cache_utils.py
+index bc2a761d86..079c6e63da 100644
+--- a/tests/v1/core/test_kv_cache_utils.py
++++ b/tests/v1/core/test_kv_cache_utils.py
+@@ -4383,3 +4383,57 @@ def test_trailing_layer_fallback_requires_exact_partition():
+     _annotate_eagle_groups(config, specs, trimmed, use_trailing_layer_fallback=True)
+ 
+     assert not any(g.is_eagle_group for g in trimmed)
++
++
++
++def test_annotate_eagle_groups_flags_separately_prefixed_drafter_layers():
++    """A drafter registered under its own module prefix after the target
++    (Qwen MTP under "mtp.") marks every group holding one of its layers as a
++    draft group; groups holding only target layers, such as the Mamba
++    groups, stay unflagged so they keep serving prefix hits."""
++    from unittest.mock import Mock
++
++    from vllm.v1.core.kv_cache_utils import _annotate_eagle_groups
++
++    attn = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
++    mamba = MambaSpec(shapes=((1, 1),), dtypes=(torch.float32,), block_size=16)
++    kv_cache_spec = {
++        "model.layers.0.attn": attn,
++        "model.layers.1.mamba": mamba,
++        "model.layers.2.attn": attn,
++        "mtp.mtp.layers.3.self_attn.attn": attn,
++    }
++    groups = [
++        KVCacheGroupSpec(["model.layers.1.mamba"], mamba),
++        KVCacheGroupSpec(["model.layers.0.attn", "model.layers.2.attn", "mtp.mtp.layers.3.self_attn.attn"], attn),
++    ]
++    vllm_config = Mock()
++    vllm_config.speculative_config.use_eagle_block_drop.return_value = True
++    _annotate_eagle_groups(
++        vllm_config, kv_cache_spec, groups, use_trailing_layer_fallback=True
++    )
++    assert [g.is_eagle_group for g in groups] == [False, True]
++
++    # A separately prefixed drafter only registers for a method that puts
++    # the drafter's layers trailing (mtp/deepseek); for any other method the
++    # caller passes the fallback off and nothing is flagged, so the
++    # coordinator keeps its conservative all-groups fallback and the
++    # unannotated-draft warning fires instead.
++    groups2 = [
++        KVCacheGroupSpec(["model.layers.1.mamba"], mamba),
++        KVCacheGroupSpec(
++            ["model.layers.0.attn", "model.layers.2.attn", "mtp.mtp.layers.3.self_attn.attn"],
++            attn,
++        ),
++    ]
++    _annotate_eagle_groups(
++        vllm_config, kv_cache_spec, groups2, use_trailing_layer_fallback=False
++    )
++    assert [g.is_eagle_group for g in groups2] == [False, False]
++
++    # No block drop configured: untouched.
++    vllm_config.speculative_config.use_eagle_block_drop.return_value = False
++    _annotate_eagle_groups(
++        vllm_config, kv_cache_spec, groups2, use_trailing_layer_fallback=True
++    )
++    assert [g.is_eagle_group for g in groups2] == [False, False]
+diff --git a/vllm/v1/core/kv_cache_utils.py b/vllm/v1/core/kv_cache_utils.py
+index af1112c54a..384adfa4d6 100644
+--- a/vllm/v1/core/kv_cache_utils.py
++++ b/vllm/v1/core/kv_cache_utils.py
+@@ -2172,20 +2172,29 @@ def _annotate_eagle_groups(
+        spec merging, wherever grouping happens to land. It is sufficient but
+        not necessary: a drafter whose spec is indistinguishable from the
+        target's cannot be found this way.
+-    2. Positional fallback for MTP drafters (including DeepseekV4/V4.1 DSpark), whose
+-       MTP block reuses the target's own decoder layer and so carries no spec
+-       marker. Their draft attention layers always register after every
+-       target layer, so flag whichever group holds the last registered layer.
+-       This rule is only valid where the groups partition exactly the layers
+-       of ``kv_cache_spec``, which is re-checked here before applying it.
+-       When a drafter's trailing caches span several groups, this rule flags
+-       only the group holding the very last layer and must be generalized.
++    2. Positional fallback for MTP drafters (including DeepseekV4/V4.1
++       DSpark), whose draft attention layers register after every target
++       layer but carry no distinguishing spec marker. It applies only when
++       the configured method registers the drafter there
++       (``use_trailing_layer_fallback``) and the groups partition exactly the
++       layers of ``kv_cache_spec``, which is re-checked here:
++       - a separately built drafter (e.g. Qwen MTP under "mtp.") uses a
++         different top-level module prefix from the target; flag every group
++         holding one of its layers. The rest, notably the Mamba groups, stay
++         clean, so they keep serving prefix hits. Left unflagged, the
++         coordinator treats every group as a draft group and cross-request
++         reuse silently drops to zero.
++       - a drafter that reuses the target's own decoder layer (same top-level
++         prefix, e.g. DeepseekV4) cannot be told apart per layer; flag
++         whichever group holds the last registered layer.
++       EAGLE heads that reuse the target's prefix are not detected here and
++       fall back to the conservative all-groups behaviour as before.
+        FIXME(yifan): avoid/generalize this hacky check.
+ 
+     Args:
+         vllm_config: Config supplying the speculative method, if any.
+         kv_cache_spec: The kv cache spec of each attention layer, in layer
+-            registration order. Only read by rule 2.
++            registration order. Read by rule 2.
+         kv_cache_groups: Groups to annotate in place.
+         use_trailing_layer_fallback: Enable rule 2. Callers gate this on
+             ``_uses_trailing_mtp_layers``.
+@@ -2202,11 +2211,45 @@ def _annotate_eagle_groups(
+         ):
+             group.is_eagle_group = True
+ 
++    if use_trailing_layer_fallback and not _groups_partition_layers_exactly(
++        kv_cache_spec, kv_cache_groups
++    ):
++        return
++
++    if any(group.is_eagle_group for group in kv_cache_groups):
++        return
+     if not use_trailing_layer_fallback:
+         return
+-    if not _groups_partition_layers_exactly(kv_cache_spec, kv_cache_groups):
++
++    # 2. Positional fallback: the drafter's layers all register after the
++    #    target's, so only the trailing part of the registration order can
++    #    hold them.
++    names = list(kv_cache_spec)
++    if len(names) < 2:
+         return
+-    last_layer = next(reversed(kv_cache_spec))
++    first_prefix = names[0].split(".", 1)[0]
++    last_prefix = names[-1].split(".", 1)[0]
++    if last_prefix != first_prefix:
++        # A separately built drafter (e.g. Qwen MTP under "mtp.") registered
++        # after the target, under its own module prefix. Flag every group
++        # holding one of its layers.
++        drafter_layers = {name for name in names if name.split(".", 1)[0] == last_prefix}
++        # The trailing part must be homogeneous: target layers followed by a
++        # single separately built drafter, with no third prefix mixed in.
++        if any(
++            name.split(".", 1)[0] not in (first_prefix, last_prefix)
++            for name in names[: -len(drafter_layers)]
++        ):
++            return
++        for group in kv_cache_groups:
++            if drafter_layers.intersection(group.layer_names):
++                group.is_eagle_group = True
++        return
++
++    # The drafter reuses the target's own decoder layer (same top-level
++    # prefix, e.g. DeepseekV4): flag whichever group holds the last
++    # registered layer.
++    last_layer = names[-1]
+     for group in kv_cache_groups:
+         if last_layer in group.layer_names:
+             group.is_eagle_group = True
+@@ -2225,7 +2268,11 @@ def _warn_if_unannotated_eagle_mamba(
+ 
+     """
+     spec_config = vllm_config.speculative_config
+-    if spec_config is None or not spec_config.use_eagle():
++    # The all-groups fallback only exists while the trailing-block drop is
++    # on (KVCacheManager receives use_eagle=use_eagle_block_drop()); with
++    # --speculative-config disable_eagle_block_drop no group is a draft group
++    # and reuse works, so there is nothing to warn about.
++    if spec_config is None or not spec_config.use_eagle_block_drop():
+         return
+     if any(group.is_eagle_group for group in kv_cache_groups):
+         return
+

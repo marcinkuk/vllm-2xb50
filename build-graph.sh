@@ -124,9 +124,27 @@
 #   symm.rendezvous L0 error (09-21, non-fatal, oneCCL fallback engaged) is
 #   transport-specific: on B50/B70 the Triton path can fail at init, so it stays
 #   OFF by default and is opt-in per hardware. PR states re-confirmed via GitHub
-#   API: #54768 (analog of [8]) / #53990 / #53997 / #57128 / #57565 / #55390 /
-#   #56026 all still OPEN/unmerged; issues #53912 / #56917 still OPEN. No patch
-#   superseded by upstream as of 4f145167.
+#   API: #54768 (analog of [8]) / #53990 / #53997 / #57128 / #57565 all still
+#   OPEN/unmerged (#55390 is now MERGED — see next block); issues #53912 /
+#   #56917 still OPEN. No patch superseded by upstream as of 4f145167.
+#   RE-VALIDATED 2026-09-23: full 9-patch chain strict `git apply` on newest
+#   vllm main @ c961121519. Two upstream drifts found and re-hunked (only two;
+#   the other 7 patches were clean against c961121519 with no changes):
+#     (1) #55390 (Mamba+EAGLE positional draft-grouping) MERGED 2026-09-22, so
+#         step [2] was the STALE COMBINED 55390+56026 patch. It is now SPLIT to
+#         the standalone 0001-56026-on-current-main.patch, which carries ONLY
+#         the #56026 delta on top of current main: flag every KV group holding
+#         a separately-prefixed drafter's layers, and key the all-groups draft
+#         fallback warning on use_eagle_block_drop().
+#     (2) patch [8] tritonar re-hunked: xpu_communicator.py is now TRACKED in
+#         upstream main and (a) already imports `vllm.envs as envs` (the old
+#         `from vllm import envs` import hunk is now redundant -> dropped) and
+#         (b) all_reduce() now opens with a VLLM_BATCH_INVARIANT /
+#         _fixed_rank_sum guard, so the Triton fast-path is inserted AFTER that
+#         guard instead of directly before `output = input_.clone()`. The new
+#         kernel file xpu_triton_all_reduce.py and the envs.py flag
+#         (VLLM_XPU_TRITON_ALLREDUCE: bool=False, off by default) are unchanged.
+#         Runtime behavior identical: opt-in, TP=2 only, try/except -> oneCCL.
 
 # 1. Hard reset to a clean state and pull the latest upstream code
 docker builder prune -a -f
@@ -143,9 +161,15 @@ DATE=$(date +%Y-%m-%d_%H-%M)
 NAME=${DATE}-${HASH}
 V=marcinkuk/vllm-2xb50   # this repo — single source of the patches
 
-# 2. MTP draft-group / Mamba+EAGLE boundary fix (#55390 + #56026 COMBINED).
-curl -L "https://raw.githubusercontent.com/${V}/main/patches/vllm-mtp-draft-group-annotation-55390-56026.patch" -o /tmp/mtpeagle.patch
-git apply /tmp/mtpeagle.patch || { echo "FATAL: mtpeagle (55390+56026) patch no longer applies on ${HASH}"; exit 1; }
+# 2. MTP separately-prefixed-drafter KV-group fix (#56026, still open). NOTE:
+#    this used to be the COMBINED 55390+56026 patch, but #55390 (Mamba+EAGLE
+#    positional draft-grouping) is now MERGED upstream (2026-09-22), so only the
+#    #56026 delta remains. It flags every KV group holding a separately-prefixed
+#    drafter's layers as a draft group, and keys the all-groups draft fallback
+#    warning on use_eagle_block_drop(). Standalone git-format patch; re-hunked
+#    onto current main c961121519 (2026-09-23).
+curl -L "https://raw.githubusercontent.com/${V}/main/patches/0001-56026-on-current-main.patch" -o /tmp/mtpeagle.patch
+git apply /tmp/mtpeagle.patch || { echo "FATAL: 56026 patch no longer applies on ${HASH}"; exit 1; }
 NAME=${NAME}-mtpeagle
 
 # 3. Vision-tower CPU offload (VLLM_VISION_CPU_OFFLOAD_GB). Not upstream.
@@ -186,7 +210,10 @@ NAME=${NAME}-grammar
 #    "unknown env var" warning); engages only for world_size == 2. If the
 #    symm.rendezvous L0 transport fails on your GPU pair it falls back to
 #    oneCCL automatically (init is wrapped in try/except), so enabling it is
-#    safe to leave ON.
+#    safe to leave ON. RE-HUNKED 2026-09-23 for c961121519: xpu_communicator.py
+#    is now a TRACKED upstream file that already imports `vllm.envs as envs`
+#    (old import hunk dropped) and whose all_reduce() opens with a
+#    VLLM_BATCH_INVARIANT guard (fast-path inserted after it). See header.
 curl -L "https://raw.githubusercontent.com/${V}/main/patches/xpu-triton-allreduce-tp2.patch" -o /tmp/tritonar.patch
 git apply /tmp/tritonar.patch || { echo "FATAL: xpu-triton-allreduce-tp2 patch no longer applies on ${HASH}"; exit 1; }
 NAME=${NAME}-tritonar
