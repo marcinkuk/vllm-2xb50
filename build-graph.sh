@@ -3,38 +3,42 @@
 #                 on dual-Intel Arc (B50/B70, Battlemage) at TP=2 + MTP speculative decoding.
 #
 # This is build.sh PLUS the XPU-graph enablers. It applies the same 4 base
-# patches as build.sh, then the 3 XPU-specific fixes that make TP=2 + MTP +
-# graphs actually run on Battlemage, then the graph memory-profiling patch so
-# the worker budgets GPU memory for graph capture. Every patch is pulled from
-# THIS repo (marcinkuk/vllm-2xb50) — the vault is the single source of truth.
+# patches as build.sh, then the XPU-specific fixes that make TP=2 + MTP +
+# graphs actually run on Battlemage (XPU CUDA-graphs are default-on upstream
+# since #51600/dcfc17e0b, 2026-09-24, so no env switch is needed at serve
+# time). Every patch is pulled from THIS repo (marcinkuk/vllm-2xb50) — the
+# vault is the single source of truth.
 #
 # WHAT THIS UNLOCKS (vs. build.sh, which ships eager-only)
-#   VLLM_XPU_ENABLE_XPU_GRAPH=1 now actually engages CUDA-graph capture on XPU
-#   for TP=2 + MTP instead of forcing eager for every kernel. The graph path in
-#   current main (merged #34482 "Support CUDAGraph on XPU", #38193 disable-by-
-#   default, #43043 usage) is complete; what was missing for this exact config
-#   is what the XPU-specific patches below supply:
+#   XPU CUDA-graph capture is DEFAULT-ON for this config since upstream
+#   #51600 (merged 2026-09-24, dcfc17e0b): it deleted the old
+#   VLLM_XPU_ENABLE_XPU_GRAPH opt-in env var, flipped XPUPlatform to
+#   graphs-by-default (opt out with --enforce-eager), and made the worker
+#   budget graph-capture memory on XPU (which is what our former [9] memprof
+#   patch used to inject). What still needs patching for this exact config
+#   (TP=2 + MTP + GDN prefix caching on Battlemage) is:
 #     [6] getmem   : getMemoryInfo zero-free fallback on XPU        (#53990, open)
 #     [7] grammar  : keep grammar-bitmask copies on the right stream (#53997, open)
-#     [8] tritonar : TP=2 fused allreduce via Triton, envs-gated flag
-#                    (upstream analog #54768, open). The flag
-#                    VLLM_XPU_TRITON_ALLREDUCE is now DECLARED in vllm/envs.py
-#                    (bool, default 0) and the gate reads envs.VLLM_XPU_TRITON_ALLREDUCE,
-#                    so enabling it no longer triggers vLLM's "Unknown env var"
-#                    warning and the flag participates in env validation.
-#     [9] memprof  : let the XPU worker profile + budget graph-capture
-#                    memory (was hard-excluded to CUDA-like platforms only)
 #     [9b] mtphitfix : MTP/EAGLE + GDN prefix-cache corruption fix
 #                     (port of open upstream #57128; drop_eagle_block was
 #                     ignored, so a "hit" could reuse unverified draft Mamba
-#                     state — the silent-corruption root cause). NEW as of
-#                     the 2026-09-20 audit; apply AFTER the 8-patch chain.
+#                     state — the silent-corruption root cause; the symptom
+#                     is issue #53912). Applied last.
+#   [8] tritonar  : DISABLED 2026-09-24 — TP=2 one-shot Triton symmetric-
+#                   memory allreduce (opt-in VLLM_XPU_TRITON_ALLREDUCE,
+#                   upstream analog #54768 still open). Never functional on
+#                   the B50/B70 pair (symm.rendezvous L0 error 45, always
+#                   falling back to oneCCL); torch 2.14.0 (vLLM main's pin)
+#                   added fused/async-TP XPU symm-mem ops but not the raw
+#                   rendezvous transport this patch uses, so nothing
+#                   upstream made it work. oneCCL is the allreduce transport.
 #
 # RUNTIME (set on the serving process, e.g. in the container entrypoint):
-#   VLLM_XPU_ENABLE_XPU_GRAPH=1     <- the switch that turns graphs ON
-#   VLLM_XPU_TRITON_ALLREDUCE=1     <- optional; enables the TP=2 Triton AR (patch [8]); declared env flag, off by default
+#   nothing required — XPU graphs are default-on since #51600 (2026-09-24);
+#   pass --enforce-eager to run the eager baseline / canary.
 #
-# NOTE on patch [8] tritonar: it ADDS new files (xpu_triton_all_reduce.py etc).
+# NOTE on patch [8] tritonar (DISABLED in the build since 2026-09-24, see step
+#   8): when/if re-enabled, it ADDS new files (xpu_triton_all_reduce.py etc).
 #   If a tree already carries those untracked files, `git apply` of the file-
 #   creation hunks fails as an apparent "conflict" (false reject). `git clean -fdx`
 #   the tree first (or apply on a truly clean checkout) — the patch itself is fine.
@@ -47,48 +51,56 @@
 #       CCL_TOPO_FABRIC_VERTEX_CONNECTION_CHECK=0, CCL_ATL_TRANSPORT=ofi, CCL_ZE_
 #       IPC_EXCHANGE=sockets, CCL_TOPO_P2P_ACCESS=0). These are the ones to tune
 #       if the FATAL oneCCL IPC crash resurfaces — NOT patch [8].
-#   (b) Triton symmetric-memory one-shot — OPTIONAL, patch [8], now gated on the
-#       envs-declared VLLM_XPU_TRITON_ALLREDUCE (off by default). The 09-21 error
+#   (b) Triton symmetric-memory one-shot — patch [8], DISABLED in the build as
+#       of 2026-09-24 (was: OPTIONAL, gated on the envs-declared
+#       VLLM_XPU_TRITON_ALLREDUCE, off by default). The 09-21 error
 #       ("L0 error 45 in symm.rendezvous" + "XPU Triton all-reduce init failed;
-#       using oneCCL") is this path's init failing on the B50/B70 pair — it is
-#       NON-FATAL: the try/except falls back to oneCCL, so serving continues. Do
-#       NOT "fix" (b) with (a)'s oneCCL env vars; they are different transports.
-#   RECOMMENDATION: leave VLLM_XPU_TRITON_ALLREDUCE unset (off) until the
-#       symm.rendezvous L0 transport is verified working on a B50/B70 pair (it
-#       works where P2P + symm-mem are supported, e.g. some B70 configs); when
-#       on, it only takes over small 1024-aligned bf16 decode all-reduces and
-#       falls back to oneCCL for everything else. Rebuild with the new patch
-#       ([8] now declares the flag in vllm/envs.py, so the "Unknown env var"
-#       warning from the 09-21 log is gone either way).
+#       using oneCCL") is this path's init failing on the B50/B70 pair, and it
+#       never got fixed on this hardware: torch 2.14.0 (the vLLM-main pin)
+#       added fused/async-TP XPU symm-mem ops (via intel/torch-xpu-ops #3747)
+#       and IPC-handle sharing in XPUCachingAllocator, but NOT the raw
+#       symm.empty/rendezvous transport this patch uses, and the upstream
+#       analog #54768 is still open. oneCCL (a) is now the sole allreduce
+#       transport in this build. Do NOT "fix" (b) with (a)'s oneCCL env vars;
+#       they are different transports. Re-enable [8] only after a live B50/B70
+#       canary of VLLM_XPU_TRITON_ALLREDUCE=1 passes (when on, it only takes
+#       over small 1024-aligned bf16 decode all-reduces and falls back to
+#       oneCCL for everything else).
 #
-# CROSS-REFERENCES (upstream tracking — all still OPEN as of 2026-09-21)
+# CROSS-REFERENCES (upstream tracking — states as of 2026-09-24)
+#   #51600  "[XPU] enable XPU GRAPH by default" — MERGED 2026-09-24 (dcfc17e0b).
+#            Superseded our [9] memprof patch and deleted the
+#            VLLM_XPU_ENABLE_XPU_GRAPH env var (graphs are now default-on;
+#            opt out with --enforce-eager). See RE-VERIFIED note below.
 #   #56917  "[Feature]: TP=2 graph capture + MTP speculative decoding crash on
 #            Arc B70 — fix already exists upstream, unmerged"  (== this stack)
 #   #54768  "[XPU] Route small TP all-reduces to a Level Zero IPC kernel" —
-#            the open upstream analog of patch [8] tritonar. (Do not confuse
+#            open upstream analog of patch [8] tritonar, which is DISABLED in
+#            this build since 2026-09-24 (see step 8). (Do not confuse
 #            with #53989, which is a different PR: fused QK-norm+RoPE+gate.)
-#   #53990 / #53997  CySpiegel XPU PRs (covered by patches [6]/[7])
+#   #53990 / #53997  CySpiegel XPU PRs (covered by patches [6]/[7]) — still open
 #   #57128  MTP/EAGLE + GDN prefix-cache corruption fix — covered by [9b]; the
 #            full PR rewrites stale base (sink_blocks / manager registry) so only
 #            the minimal find_longest_cache_hit hunk is adopted locally.
 #   #53912  "[Bug]: MTP + prefix caching corruption (empty/repeated output)" —
-#            the symptom #9b addresses on this exact config.
+#            the symptom [9b] addresses on this exact config.
 #   imryanpurdy/Qwen3.8-27B-4x-Intel-B70s  — same model, MTP5 + graphs shipped,
 #            144 tok/s, bit-identical canary (docs/CAMPAIGN-2026-09-10-GRAPHS.md)
 #
 # VERIFY BEFORE TRUSTING (canary): corruption is config-specific, so re-run the
 #   deterministic canary (5 prompts, temp=0, sha256 of the 64-token completion)
-#   against eager before shipping any graphs build. The 0002/memprof patch only
-#   changes memory profiling, not numerics — but the graph path itself must be
-#   canaried on YOUR build.
+#   against eager before shipping any graphs build. [9b] mtphitfix fixes a
+#   cache-logic bug (not a memory/profiling change), so the canary still
+#   measures it; the graph path itself must be canaried on YOUR build.
 #
 # Apply order matters: embed-quant [4] BEFORE mtp-vocab [5]; the XPU patches
-# [6]-[8] are independent of the MTP block but applied after it to match the
-# validated 8-patch flow (mtpeagle,vision,embed,mtpvocab,getmem,grammar,
-# tritonar,memprof), with [9b] mtphitfix last (it touches
-# single_type_kv_cache_manager.py, which no earlier patch modifies). Every
-# patch FAILS THE BUILD loudly if it no longer applies (upstream drift); it
-# never silently skips.
+# [6]-[7] are independent of the MTP block but applied after it, giving the
+# validated 7-patch flow (mtpeagle,vision,embed,mtpvocab,getmem,grammar,
+# mtphitfix) — [8] tritonar is DISABLED (2026-09-24) and [9] memprof was
+# superseded by upstream #51600 (2026-09-24), so [9b] mtphitfix is last (it
+# touches single_type_kv_cache_manager.py, which no earlier patch modifies).
+# Every applied patch FAILS THE BUILD loudly if it no longer applies
+# (upstream drift); none silently skip.
 #
 # VALIDATED 2026-09-20: all 8 original patches strict `git apply` on
 #   vllm-project/vllm main @ 17e50b9b76 / 9679173788 (also 4868312); the 9th
@@ -167,6 +179,35 @@
 #   vllm main @ 8b660ce96 (2026-09-23 14:16 UTC). PR states re-checked:
 #   #55390 MERGED, #56026 still OPEN; #54768 / #53990 / #53997 / #57128 still
 #   OPEN. All 9 raw.githubusercontent.com patch URLs live (HTTP 200).
+#   RE-VERIFIED 2026-09-25: the 7-patch chain (mtpeagle, vision, embed-quant,
+#   mtp-vocab, getmem, grammar, mtphitfix) strict `git apply` clean on current
+#   vllm main @ 0908116dd and e33de821c; era-gate PASS. Changes to THIS script:
+#     (1) [9] graphmemprof DROPPED — superseded by #51600 (dcfc17e0b, merged
+#         2026-09-24): XPU graphs are now default-on and gpu_worker budgets
+#         graph-capture memory on XPU (exactly what [9] injected); its patch
+#         no longer applies (the base lines it expected are gone). The
+#         VLLM_XPU_ENABLE_XPU_GRAPH env var it documented was deleted from
+#         vllm/envs.py, so the old 'Serve with' line is obsolete — graphs run
+#         without any env switch; pass --enforce-eager for the eager canary.
+#     (2) [8] tritonar DISABLED — no upstream fix made it work: #54768 still
+#         open, and torch 2.14.0 (vLLM main's current pin) added fused/async-TP
+#         XPU symm-mem ops (via intel/torch-xpu-ops #3747) and IPC-handle
+#         sharing in XPUCachingAllocator, but NOT the raw symm.empty/rendezvous
+#         transport this patch uses (the B50/B70 pair still hits L0 error 45 in
+#         symm.rendezvous; it always fell back to oneCCL). oneCCL remains the
+#         allreduce transport; optional oneAPI tuning (CCL_ATL_TRANSPORT=ofi,
+#         CCL_ZE_IPC_EXCHANGE=sockets, CCL_TOPO_P2P_ACCESS=0,
+#         CCL_TOPO_FABRIC_VERTEX_CONNECTION_CHECK=0) only if the FATAL oneCCL
+#         IPC crash resurfaces. Re-enable [8] only after a live B50/B70 canary
+#         of VLLM_XPU_TRITON_ALLREDUCE=1 passes.
+#     (3) era-gate narrowed to the single _uses_trailing_mtp_layers marker
+#         (the #55390 merge, 0bce411a, 2026-09-22): [8] tritonar was the only
+#         patch anchored to the VLLM_BATCH_INVARIANT guard (#55881), so that
+#         marker is no longer a build requirement.
+#   Upstream states re-checked 2026-09-25: #55390 and #55881 MERGED (the
+#   VLLM_BATCH_INVARIANT guard is still in xpu_communicator.py on main);
+#   #56026 / #53990 / #53997 / #54768 / #57128 / #57565 all still OPEN; issues
+#   #53912 and #56917 still OPEN. All 7 live patch URLs HTTP 200.
 
 # 1. Hard reset to a clean state and pull the latest upstream code
 docker builder prune -a -f
@@ -183,33 +224,32 @@ DATE=$(date +%Y-%m-%d_%H-%M)
 NAME=${DATE}-${HASH}
 V=marcinkuk/vllm-2xb50   # this repo — single source of the patches
 
-# 1b. Base-era gate: the 9 patches are re-hunked for a specific upstream era, so
-#     check the base's era BEFORE trying to apply anything, and fail with an
-#     actionable message instead of a cryptic per-patch "patch does not apply".
-#     (This is the "patch no longer applies" guard, made specific.)
-#     Verified window: 56026 files match blob-for-blob from the #55390 merge
-#     (0bce411a, 2026-09-22) through 8b660ce96 (2026-09-23 14:16 UTC).
+# 1b. Base-era gate: the retained patches are re-hunked for a specific upstream
+#     era, so check the base's era BEFORE trying to apply anything, and fail
+#     with an actionable message instead of a cryptic per-patch "patch does
+#     not apply". (This is the "patch no longer applies" guard, made specific.)
+#     The [2] mtpeagle patch is the #56026 delta ON TOP of merged #55390
+#     (0bce411a, 2026-09-22), so its two files (kv_cache_utils.py and its test)
+#     only match main from that merge onward — verified blob-for-blob from
+#     0bce411a through e33de821c (2026-09-24). The VLLM_BATCH_INVARIANT marker
+#     (#55881) was the anchor of the now-DISABLED [8] tritonar patch, so it is
+#     no longer a build requirement (it is still in main; kept here for
+#     reference only, not checked).
 era_ok=1
 for marker in \
-  "vllm/v1/core/kv_cache_utils.py:_uses_trailing_mtp_layers" \
-  "vllm/distributed/device_communicators/xpu_communicator.py:VLLM_BATCH_INVARIANT"; do
+  "vllm/v1/core/kv_cache_utils.py:_uses_trailing_mtp_layers"; do
   f="${marker%%:*}"; pat="${marker##*:}"
   if ! git grep -q "$pat" -- "$f"; then
     era_ok=0
-    if [ "$f" = "vllm/v1/core/kv_cache_utils.py" ]; then
-      echo "NOTE: base ${HASH} predates the #55390 merge (0bce411a, 2026-09-22)."
-    else
-      echo "NOTE: base ${HASH} predates #55881 (e4340e41c, VLLM_BATCH_INVARIANT guard)."
-    fi
+    echo "NOTE: base ${HASH} predates the #55390 merge (0bce411a, 2026-09-22)."
   fi
 done
 if [ "$era_ok" != 1 ]; then
   echo "FATAL: base ${HASH} is outside the verified patch era (needs main at/after"
-  echo "       e4340e41c, 2026-09-22). Fix: 'git fetch origin && git reset --hard"
-  echo "       origin/main' and re-run. Known-good main for this patch set:"
-  echo "       bc162b3f9 (2026-09-22) .. 8b660ce96 (2026-09-23, verified)."
-  echo "       If you MUST build on ${HASH}: the 8-patch chain minus [8] tritonar"
-  echo "       still applies; re-hunk [8] for the older all_reduce() first."
+  echo "       0bce411a, the #55390 merge, 2026-09-22). Fix: 'git fetch origin &&"
+  echo "       git reset --hard origin/main' and re-run. Known-good main for"
+  echo "       this patch set: 0bce411a (2026-09-22) .. e33de821c (2026-09-24,"
+  echo "       verified)."
   exit 1
 fi
 
@@ -263,34 +303,35 @@ curl -L "https://raw.githubusercontent.com/${V}/main/patches/xpu-grammar-bitmask
 git apply /tmp/grammar.patch || { echo "FATAL: xpu-grammar-bitmask-stream-fix patch no longer applies on ${HASH}"; exit 1; }
 NAME=${NAME}-grammar
 
-# 8. XPU Triton allreduce for TP=2 (upstream analog #54768, open). Opt-in at
-#    runtime via VLLM_XPU_TRITON_ALLREDUCE=1 (declared in vllm/envs.py, so no
-#    "unknown env var" warning); engages only for world_size == 2. If the
-#    symm.rendezvous L0 transport fails on your GPU pair it falls back to
-#    oneCCL automatically (init is wrapped in try/except), so enabling it is
-#    safe to leave ON. RE-HUNKED 2026-09-23 for c961121519: xpu_communicator.py
-#    is now a TRACKED upstream file that already imports `vllm.envs as envs`
-#    (old import hunk dropped) and whose all_reduce() opens with a
-#    VLLM_BATCH_INVARIANT guard (fast-path inserted after it). See header.
-curl -L "https://raw.githubusercontent.com/${V}/main/patches/xpu-triton-allreduce-tp2.patch" -o /tmp/tritonar.patch
-git apply /tmp/tritonar.patch || { echo "FATAL: xpu-triton-allreduce-tp2 patch no longer applies on ${HASH}."; \
-  echo "       If 'xpu_communicator.py: patch does not apply' is the cause, the base" \
-  echo "       predates the VLLM_BATCH_INVARIANT guard (#55881, e4340e41c) that this" \
-  echo "       re-hunk anchors on. Fix: build on main at/after e4340e41c (current main" \
-  echo "       qualifies); the new-file + envs.py hunks are era-independent."; exit 1; }
-NAME=${NAME}-tritonar
+# 8. [DISABLED 2026-09-24] XPU Triton allreduce for TP=2 (upstream analog
+#    #54768, still OPEN). Not applied in this build: it never worked on the
+#    B50/B70 pair (symm.rendezvous L0 error 45 -> oneCCL fallback on every
+#    boot), and no upstream change fixed that transport — torch 2.14.0 (the
+#    vLLM-main pin) gained fused/async-TP XPU symm-mem ops (via
+#    intel/torch-xpu-ops #3747) and XPUCachingAllocator IPC-handle sharing,
+#    but not the raw symm.empty/rendezvous path this patch exercises, and
+#    #54768 is unmerged. Allreduce runs over oneCCL (see the (a) transport
+#    note in the header for the optional oneAPI tuning envs). Re-enable by
+#    un-commenting — after a live B50/B70 canary of
+#    VLLM_XPU_TRITON_ALLREDUCE=1 proves the init succeeds:
+# curl -L "https://raw.githubusercontent.com/${V}/main/patches/xpu-triton-allreduce-tp2.patch" -o /tmp/tritonar.patch
+# git apply /tmp/tritonar.patch || { echo "FATAL: xpu-triton-allreduce-tp2 patch no longer applies on ${HASH}."; \
+#   echo "       If 'xpu_communicator.py: patch does not apply' is the cause, the base" \
+#   echo "       predates the VLLM_BATCH_INVARIANT guard (#55881, e4340e41c) that this" \
+#   echo "       re-hunk anchors on. Fix: build on main at/after e4340e41c (current main" \
+#   echo "       qualifies); the new-file + envs.py hunks are era-independent."; exit 1; }
+# NAME=${NAME}-tritonar
+# (The patch file itself stays in the vault as a reference artifact.)
 
-# 9. XPU CUDA-graph memory profiling (net-new; enables graphs to be budgeted).
-#    The base gpu_worker determine_available_memory() only called
-#    model_runner.profile_cudagraph_memory() for CUDA-like platforms (XPU was
-#    hard-excluded with "see #39977"). This lets the XPU worker profile its
-#    graph-capture footprint so it reserves room for the captured graphs
-#    instead of running short on KV memory when graphs engage under TP=2.
-#    Safe on XPU: the capture/profiling path runs through the persistent
-#    torch.cuda->torch.xpu shim in xpu_model_runner.py (_torch_cuda_wrapper).
-curl -L "https://raw.githubusercontent.com/${V}/main/patches/xpu-cudagraph-memory-profiling.patch" -o /tmp/memprof.patch
-git apply /tmp/memprof.patch || { echo "FATAL: xpu-cudagraph-memory-profiling patch no longer applies on ${HASH}"; exit 1; }
-NAME=${NAME}-graphmemprof
+# 9. [DROPPED 2026-09-24] XPU CUDA-graph memory profiling — superseded by
+#    upstream #51600 (merged 2026-09-24, commit dcfc17e0b), which made XPU
+#    graphs default-on AND made gpu_worker determine_available_memory() call
+#    profile_cudagraph_memory() on XPU (the exact line [9] used to add) and
+#    dropped the "XPU stays excluded (see #39977)" clause. The patch no
+#    longer applies on main at/after dcfc17e0b (verified: it fails on
+#    gpu_worker.py), and the VLLM_XPU_ENABLE_XPU_GRAPH env var it used to
+#    document is gone from vllm/envs.py — graphs are now on by default, opt
+#    out with --enforce-eager.
 
 # 9b. MTP/EAGLE prefix-cache corruption fix (port of upstream #57128, still open/dirty).
 #     In MambaManager.find_longest_cache_hit the drop_eagle_block flag was ACCEPTED
@@ -301,8 +342,9 @@ NAME=${NAME}-graphmemprof
 #     ON + MTP ON. Fix: when drop_eagle_block is set, skip only the FIRST (most
 #     recent) checkpoint the finder matches, then keep scanning for the next
 #     (older, committed) one — instead of blanking the whole search tail. Self-contained
-#     42-line change, verified to `git apply` on 9679173788 / 4868312 / 27757dde02 and
-#     on top of the 8-patch chain.
+#     42-line change, applied last in the chain (it touches
+#     single_type_kv_cache_manager.py, which no earlier patch modifies); verified to
+#     `git apply` on current main (0908116dd / e33de821c, 2026-09-24).
 curl -L "https://raw.githubusercontent.com/${V}/main/patches/xpu-mtp-prefix-hit-fix.patch" -o /tmp/mtp-hitfix.patch
 git apply /tmp/mtp-hitfix.patch || { echo "FATAL: xpu-mtp-prefix-hit-fix patch no longer applies on ${HASH}"; exit 1; }
 NAME=${NAME}-mtphitfix
@@ -312,5 +354,6 @@ docker build --cpuset-cpus="0" --memory="16g" --no-cache -f docker/Dockerfile.xp
 
 echo vllm-intel-xpu:${NAME}
 echo
-echo "Serve with:  VLLM_XPU_ENABLE_XPU_GRAPH=1 [VLLM_XPU_TRITON_ALLREDUCE=1] vllm serve ..."
+echo "Serve with:  vllm serve ... (XPU graphs default-on since #51600/2026-09-24;"
+echo "             no env switch needed; --enforce-eager for the eager canary)"
 echo "Remember the canary: 5 deterministic prompts, temp=0, sha256 vs eager before trusting graphs."
