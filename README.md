@@ -157,24 +157,35 @@ capacity and LRU eviction to the filesystem tier`. Adds an optional
 `max_bytes` bound to the fs (disk) KV tier so it evicts least-recently-used
 blocks instead of writing until the volume's disk quota is exhausted.
 
-- **Upstream status (re-checked 2026-09-26):** PR #54327 is **OPEN / unmerged
-  (mergeable_state: blocked)** (head `8cd8ebf1`, base `10e6a7f2`). This file is
-  a byte-identical vendored copy of that head, re-verified to `git apply`
-  cleanly on newest vllm `main @ 31f2e70cd` (2026-09-26, re-checked after the
-  09-25 incident; also clean on `3b4566c5cf`);
-  fs-tier test suite on the patched tree (CPU sandbox, re-run on `31f2e70cd`):
-  **44 passed / 11 skipped, 0 failed** — the 11 new bounded-capacity tests
-  all pass (baseline on unpatched `31f2e70cd`: 33 passed / 11 skipped; the
-  55/44 "errors" are teardown-only `torch.accelerator.empty_cache` failures
-  from running on a CPU-only box, present identically in both runs).
+- **Upstream status (re-checked 2026-09-26, three times):** PR #54327 is
+  **OPEN / unmerged** (head `8cd8ebf1`, base `10e6a7f2` — stale vs current
+  main; no PR activity since 2026-09-20). This file is a byte-identical
+  vendored copy of that head, re-verified to `git apply` cleanly on newest
+  vllm `main @ 7d8c5fe9a` (2026-09-26, third re-check after the 09-25
+  incident; also clean on `ad6817b68`, `31f2e70cd`, `3b4566c5cf`). The 7
+  commits since `ad6817b68` (#58786, #58754, #58046, #58749, #58594, #58810,
+  #58499) touch no patch-era file — the only ones landing in a patch-era file
+  are #58046's `qwen3_5.py` / `qwen3_5_mtp.py` hunks, which are
+  annotation-only (`ClassVar`, `get_multimodal_config()`,
+  `MultiModalFeatureSpec`) far from the [4]/[5] anchor regions, so all 8
+  patches apply byte-clean, no re-hunk needed. fs-tier test suite on the
+  patched tree (CPU sandbox, re-run on `7d8c5fe9a`): **44 passed /
+  11 skipped, 0 failed** — the 11 new bounded-capacity tests all pass
+  (baseline on unpatched `31f2e70cd`: 33 passed / 11 skipped; the 55
+  "errors" are teardown-only
+  `RuntimeError: Cannot access accelerator device when none is available`
+  from running on a CPU-only box, present identically in the baseline).
 - **Why it is needed:** with `--kv-transfer-config` pointing an fs tier at a
   quota'd volume (the `/vllm_prefix_cache` PVC), the *unbounded* fs tier keeps
   storing KV blocks until the per-directory disk quota is hit. The 2026-09-25
-  production log shows `123x [Errno 122] "Disk quota exceeded"` + `129`
-  short-write errors, **all in the rank-0 dir** `<model>_<digest>_r0`. The tier
-  was doing its job (external prefix-cache hit 23.7-92.1%, cumulative
-  store_bytes 25.6 GiB vs load_bytes 310 GiB) — it just had no capacity bound,
-  so it ate the quota. XPU KV usage peaked at 96% but was **not** the cause.
+  production log (`_vllm-59-vllm-server-1_logs - przepelnienie cache.txt`,
+  window 09:07..11:13) shows `123x [Errno 122] "Disk quota exceeded"` + `129`
+  short-write errors (**252** `block I/O failed` in total), **all in the
+  rank-0 dir** `<model>_<digest>_r0`. The tier was doing its job (external
+  prefix-cache hit 23.7-92.1%; per-interval `kv_offload_store_bytes` /
+  `kv_offload_load_bytes` sum over the window to ~27.5 / ~333 GiB) — it just
+  had no capacity bound, so it ate the quota. XPU KV usage peaked at 96% but
+  was **not** the cause.
 - **What it does:** adds `max_bytes: int | None = None` to the fs-tier manager
   (`vllm/v1/kv_offload/tiering/fs/manager.py`) plus LRU/byte accounting. When
   set, the tier evicts least-recently-used blocks before a store that would

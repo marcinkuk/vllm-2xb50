@@ -95,11 +95,13 @@
 #   #53912  "[Bug]: MTP + prefix caching corruption (empty/repeated output)" —
 #            the symptom [9b] addresses on this exact config.
 #   #54327  "[Feature][KV Offload] Add bounded capacity and LRU eviction to the
-#            filesystem tier" — still OPEN/unmerged (re-checked 2026-09-26,
-#            head 8cd8ebf1, base 10e6a7f2). Vendored locally as [9c] fstier
-#            because the unbounded fs tier is failing in production (disk-
-#            quota exhaustion of the /vllm_prefix_cache volume, 09-25 log).
-#            Once MERGED upstream, drop step 9c — main will carry it natively.
+#            filesystem tier" — still OPEN/unmerged (re-checked 2026-09-26
+#            three times, no PR activity since 2026-09-20, base 10e6a7f2 is
+#            stale vs current main). Vendored locally as [9c] fstier because
+#            the unbounded fs tier is failing in production (disk-quota
+#            exhaustion of the /vllm_prefix_cache volume, 09-25 log: 123x
+#            [Errno 122] + 129 short writes, all in the _r0 dir). Once
+#            MERGED upstream, drop step 9c — main will carry it natively.
 #   imryanpurdy/Qwen3.8-27B-4x-Intel-B70s  — same model, MTP5 + graphs shipped,
 #            144 tok/s, bit-identical canary (docs/CAMPAIGN-2026-09-10-GRAPHS.md)
 #
@@ -239,12 +241,32 @@
 #   unpatched 31f2e70cd: 33 passed / 11 skipped; the 55/44 teardown
 #   "errors" are CPU-only-box `torch.accelerator.empty_cache` noise,
 #   present identically in both runs; all 11 new bounded-capacity tests
-#   pass). Motivating failure: 09-25 production log (container 59) —
-#   123x [Errno 122] "Disk quota exceeded" + 129 short-write errors, all in
+#   pass). Motivating failure: 09-25 production log (container 59, window
+#   09:07..11:13) — 123x [Errno 122] "Disk quota exceeded" + 129 short-write
+#   errors = 252 "block I/O failed", all in
 #   /vllm_prefix_cache/<model>_<digest>_r0/ (fs-tier disk-quota exhaustion;
-#   XPU KV usage peaked at 96% but is not the cause), cumulative
-#   store_bytes 25.6 GiB vs load_bytes 310 GiB, external prefix-cache hit
-#   23.7-92.1% — the fs tier is doing its job, it just has no capacity bound.
+#   XPU KV usage peaked at 96% but is not the cause); over that window the
+#   per-interval kv_offload_store_bytes/load_bytes sum to ~27.5 / ~333 GiB
+#   and the external prefix-cache hit rate ran 23.7-92.1% — the fs tier is
+#   doing its job, it just has no capacity bound.
+#   RE-VERIFIED 2026-09-26 (3rd): full 8-patch chain strict `git apply` clean
+#   on newest vllm main @ 7d8c5fe9a (2026-09-26 15:37 UTC). The 7 commits since
+#   ad6817b68 (#58786 Anthropic thinking w/ P/D, #58754 Anthropic inline-system
+#   merge detect, #58046 mypy typing for Qwen/Qianfan, #58749 CI cudagraph-mode
+#   overhead, #58594 GLM5.3 sparse-indexer attn, #58810 CI batch submission,
+#   #58499 DSV4.1 ViT cudagraph replay) touch NO patch-era file: the only ones
+#   in a patch-era file are #58046's qwen3_5.py/qwen3_5_mtp.py hunks, which are
+#   annotation-only (ClassVar, get_multimodal_config(), MultiModalFeatureSpec)
+#   far from the [4]/[5] anchor regions — all 8 patches apply byte-clean, no
+#   re-hunk needed. fs-tier suite on the patched 7d8c5fe9a tree (CPU sandbox):
+#   44 passed / 11 skipped, 0 failed — identical to the ad6817b68 run (the 55
+#   "errors" are the same CPU-only teardown noise, present in the unpatched
+#   baseline too). PR #54327 re-checked a third time: still OPEN, no activity
+#   since 2026-09-20. The incident evidence file
+#   (_vllm-59-vllm-server-1_logs - przepelnienie cache.txt, container 59,
+#   window 09-25 09:07..11:13) re-confirmed 123x [Errno 122] + 129
+#   "Short write: expected 55705600 bytes, wrote 33685504" I/O failures, all in
+#   the <model>_<digest>_r0 dir — the exact failure [9c] fstier bounds.
 
 # 1. Hard reset to a clean state and pull the latest upstream code
 docker builder prune -a -f
@@ -397,8 +419,24 @@ NAME=${NAME}-mtphitfix
 #     DIRECTORY (<model>_<digest>_r<rank>) and requires exclusive ownership of
 #     it; it is INERT unless the serve --kv-transfer-config fs tier sets
 #     "max_bytes" — see the final echo and the patch README.
-curl -L "https://raw.githubusercontent.com/${V}/main/patches/fs-tier-max-bytes-54327.patch" -o /tmp/fstier-maxbytes.patch
-git apply /tmp/fstier-maxbytes.patch || { echo "FATAL: fs-tier-max-bytes-54327 patch no longer applies on ${HASH}."; \
+# The patch lives in THIS vault repo; the raw URL only serves it once the
+# vault's main is pushed. Prefer a local vault checkout (VAULT_LOCAL=/path/to/
+# vllm-2xb50) and fall back to the raw URL; a 404 (not pushed yet) fails with
+# a different, actionable message than upstream drift (fetched, no apply).
+FSTIER_PATCH=""
+if [ -n "${VAULT_LOCAL:-}" ] && [ -f "${VAULT_LOCAL}/patches/fs-tier-max-bytes-54327.patch" ]; then
+  FSTIER_PATCH="${VAULT_LOCAL}/patches/fs-tier-max-bytes-54327.patch"
+else
+  curl -fL "https://raw.githubusercontent.com/${V}/main/patches/fs-tier-max-bytes-54327.patch" -o /tmp/fstier-maxbytes.patch 2>/dev/null
+  [ -s /tmp/fstier-maxbytes.patch ] && FSTIER_PATCH=/tmp/fstier-maxbytes.patch
+fi
+if [ -z "$FSTIER_PATCH" ]; then
+  echo "FATAL: cannot fetch patches/fs-tier-max-bytes-54327.patch (raw URL 404 —"
+  echo "       the vault's main carrying [9c] is not pushed yet). Fix: 'git push"
+  echo "       origin main' in marcinkuk/vllm-2xb50, or set"
+  echo "       VAULT_LOCAL=/path/to/local/vllm-2xb50-checkout and re-run."; exit 1;
+fi
+git apply "$FSTIER_PATCH" || { echo "FATAL: fs-tier-max-bytes-54327 patch no longer applies on ${HASH}."; \
   echo "       The patch vendors open upstream #54327 (head 8cd8ebf1) against the" \
   echo "       tiering fs manager (manager.py + test + docs). Upstream drift:" \
   echo "       re-hunk the patch onto current main (update the 'index' hashes) and" \
