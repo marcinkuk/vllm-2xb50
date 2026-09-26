@@ -23,7 +23,15 @@
 #                     (port of open upstream #57128; drop_eagle_block was
 #                     ignored, so a "hit" could reuse unverified draft Mamba
 #                     state — the silent-corruption root cause; the symptom
-#                     is issue #53912). Applied last.
+#                     is issue #53912).
+#     [9c] fstier   : bounded capacity + LRU eviction for the fs (disk) KV
+#                     tier (vendored open upstream #54327, head 8cd8ebf1):
+#                     without it the unbounded fs tier writes until the
+#                     /vllm_prefix_cache volume quota is hit (09-25 log:
+#                     123x [Errno 122] "Disk quota exceeded" + 129 short
+#                     writes, all in _r0). Inert unless the serve
+#                     --kv-transfer-config fs tier sets "max_bytes".
+#                     Applied last.
 #   [8] tritonar  : DISABLED 2026-09-24 — TP=2 one-shot Triton symmetric-
 #                   memory allreduce (opt-in VLLM_XPU_TRITON_ALLREDUCE,
 #                   upstream analog #54768 still open). Never functional on
@@ -35,7 +43,9 @@
 #
 # RUNTIME (set on the serving process, e.g. in the container entrypoint):
 #   nothing required — XPU graphs are default-on since #51600 (2026-09-24);
-#   pass --enforce-eager to run the eager baseline / canary.
+#   pass --enforce-eager to run the eager baseline / canary. [9c] fstier
+#   needs no env either, but it is INERT unless the serve --kv-transfer-
+#   config fs tier sets "max_bytes" (see step 9c and the patch README).
 #
 # NOTE on patch [8] tritonar (DISABLED in the build since 2026-09-24, see step
 #   8): when/if re-enabled, it ADDS new files (xpu_triton_all_reduce.py etc).
@@ -84,6 +94,12 @@
 #            the minimal find_longest_cache_hit hunk is adopted locally.
 #   #53912  "[Bug]: MTP + prefix caching corruption (empty/repeated output)" —
 #            the symptom [9b] addresses on this exact config.
+#   #54327  "[Feature][KV Offload] Add bounded capacity and LRU eviction to the
+#            filesystem tier" — still OPEN/unmerged (re-checked 2026-09-26,
+#            head 8cd8ebf1, base 10e6a7f2). Vendored locally as [9c] fstier
+#            because the unbounded fs tier is failing in production (disk-
+#            quota exhaustion of the /vllm_prefix_cache volume, 09-25 log).
+#            Once MERGED upstream, drop step 9c — main will carry it natively.
 #   imryanpurdy/Qwen3.8-27B-4x-Intel-B70s  — same model, MTP5 + graphs shipped,
 #            144 tok/s, bit-identical canary (docs/CAMPAIGN-2026-09-10-GRAPHS.md)
 #
@@ -97,8 +113,10 @@
 # [6]-[7] are independent of the MTP block but applied after it, giving the
 # validated 7-patch flow (mtpeagle,vision,embed,mtpvocab,getmem,grammar,
 # mtphitfix) — [8] tritonar is DISABLED (2026-09-24) and [9] memprof was
-# superseded by upstream #51600 (2026-09-24), so [9b] mtphitfix is last (it
-# touches single_type_kv_cache_manager.py, which no earlier patch modifies).
+# superseded by upstream #51600 (2026-09-24). [9b] mtphitfix touches
+# single_type_kv_cache_manager.py and [9c] fstier only
+# vllm/v1/kv_offload/tiering/fs/manager.py (+ its test + docs), which no
+# earlier patch modifies, so [9b] then [9c] go last, in that order.
 # Every applied patch FAILS THE BUILD loudly if it no longer applies
 # (upstream drift); none silently skip.
 #
@@ -208,6 +226,25 @@
 #   VLLM_BATCH_INVARIANT guard is still in xpu_communicator.py on main);
 #   #56026 / #53990 / #53997 / #54768 / #57128 / #57565 all still OPEN; issues
 #   #53912 and #56917 still OPEN. All 7 live patch URLs HTTP 200.
+#   RE-VERIFIED 2026-09-26 (post-incident): added [9c] fstier — vendored
+#   upstream PR #54327 (head 8cd8ebf1, still OPEN/unmerged/blocked, re-checked
+#   2026-09-26): bounded capacity (max_bytes) + LRU eviction for the fs tier.
+#   The 8-patch chain (the 7 above + fstier) strict `git apply` clean on
+#   newest vllm main @ 31f2e70cd (2026-09-26) — and earlier on 3b4566c5cf;
+#   all 7 prior patches' pre-images clean on both (no upstream drift in their
+#   files since 0908116dd/e33de821c; the 2 commits since 3b4566c5, #58830
+#   multimodal-processor security gate + #58609 CI split, touch no
+#   patch-era file). fs-tier test suite on the patched tree (CPU sandbox,
+#   re-run on 31f2e70cd): 44 passed / 11 skipped, 0 failed (baseline on
+#   unpatched 31f2e70cd: 33 passed / 11 skipped; the 55/44 teardown
+#   "errors" are CPU-only-box `torch.accelerator.empty_cache` noise,
+#   present identically in both runs; all 11 new bounded-capacity tests
+#   pass). Motivating failure: 09-25 production log (container 59) —
+#   123x [Errno 122] "Disk quota exceeded" + 129 short-write errors, all in
+#   /vllm_prefix_cache/<model>_<digest>_r0/ (fs-tier disk-quota exhaustion;
+#   XPU KV usage peaked at 96% but is not the cause), cumulative
+#   store_bytes 25.6 GiB vs load_bytes 310 GiB, external prefix-cache hit
+#   23.7-92.1% — the fs tier is doing its job, it just has no capacity bound.
 
 # 1. Hard reset to a clean state and pull the latest upstream code
 docker builder prune -a -f
@@ -349,11 +386,40 @@ curl -L "https://raw.githubusercontent.com/${V}/main/patches/xpu-mtp-prefix-hit-
 git apply /tmp/mtp-hitfix.patch || { echo "FATAL: xpu-mtp-prefix-hit-fix patch no longer applies on ${HASH}"; exit 1; }
 NAME=${NAME}-mtphitfix
 
-# 10. Build the XPU image (graphs-capable).
+# 9c. Bounded capacity + LRU eviction for the fs (disk) KV tier (vendored
+#     upstream PR #54327, head 8cd8ebf1, still OPEN/unmerged). Adds a
+#     `max_bytes` param to the fs-tier manager: when set, the tier evicts
+#     least-recently-used blocks to stay under the bound before a store,
+#     protects blocks in an active load/store, and skips a cache write when a
+#     batch cannot fit (without failing the request). Applied LAST in the chain
+#     (it only touches vllm/v1/kv_offload/tiering/fs/manager.py + its test + the
+#     usage doc, which no earlier patch modifies). The bound is PER RANK
+#     DIRECTORY (<model>_<digest>_r<rank>) and requires exclusive ownership of
+#     it; it is INERT unless the serve --kv-transfer-config fs tier sets
+#     "max_bytes" — see the final echo and the patch README.
+curl -L "https://raw.githubusercontent.com/${V}/main/patches/fs-tier-max-bytes-54327.patch" -o /tmp/fstier-maxbytes.patch
+git apply /tmp/fstier-maxbytes.patch || { echo "FATAL: fs-tier-max-bytes-54327 patch no longer applies on ${HASH}."; \
+  echo "       The patch vendors open upstream #54327 (head 8cd8ebf1) against the" \
+  echo "       tiering fs manager (manager.py + test + docs). Upstream drift:" \
+  echo "       re-hunk the patch onto current main (update the 'index' hashes) and" \
+  echo "       re-run."; exit 1; }
+NAME=${NAME}-fstier
+
+# 11. Build the XPU image (graphs-capable).
 docker build --cpuset-cpus="0" --memory="16g" --no-cache -f docker/Dockerfile.xpu -t vllm-intel-xpu:${NAME} .
 
 echo vllm-intel-xpu:${NAME}
 echo
 echo "Serve with:  vllm serve ... (XPU graphs default-on since #51600/2026-09-24;"
 echo "             no env switch needed; --enforce-eager for the eager canary)"
+echo "[9c] fstier (PR #54327) ships bounded-capacity + LRU eviction for the fs"
+echo "     KV tier. It is INERT unless you enable it on the serve fs tier, e.g.:"
+echo "       --kv-transfer-config '{\"kv_connector\":\"OffloadingConnector\",\"kv_role\":\"kv_both\","
+echo "         \"kv_connector_extra_config\":{\"spec_name\":\"TieringOffloadingSpec\","
+echo "         \"cpu_bytes_to_use\":12884901888,\"secondary_tiers\":[{\"type\":\"fs\","
+echo "         \"root_dir\":\"/vllm_prefix_cache\",\"n_read_threads\":8,\"n_write_threads\":8,"
+echo "         \"max_bytes\":<per-rank-dir byte cap>]}}'"
+echo "     The bound is per <model>_<digest>_r<rank> dir and requires exclusive"
+echo "     ownership of it (no multi-engine sharing in bounded mode). Size it to"
+echo "     the volume's per-dir quota so LRU eviction happens BEFORE [Errno 122] quota."
 echo "Remember the canary: 5 deterministic prompts, temp=0, sha256 vs eager before trusting graphs."

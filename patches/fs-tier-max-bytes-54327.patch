@@ -1,0 +1,647 @@
+diff --git a/docs/features/kv_offloading_usage.md b/docs/features/kv_offloading_usage.md
+index 22a2350d80..3e72ded181 100644
+--- a/docs/features/kv_offloading_usage.md
++++ b/docs/features/kv_offloading_usage.md
+@@ -88,7 +88,8 @@ vllm serve <model> \
+           "type": "fs",
+           "root_dir": "/mnt/kv_cache",
+           "n_read_threads": 32,
+-          "n_write_threads": 16
++          "n_write_threads": 16,
++          "max_bytes": 107374182400
+         }
+       ]
+     }
+@@ -160,11 +161,25 @@ The filesystem tier (`type: "fs"`) writes blocks to a filesystem directory.
+ | `root_dir` | yes | — | Base directory; vLLM creates subdirectories beneath it (see [On-Disk Layout](#on-disk-layout)). |
+ | `n_read_threads` | no | `16` | Read-priority I/O threads (load path). |
+ | `n_write_threads` | no | `16` | Write-priority I/O threads (store path). |
++| `max_bytes` | no | unlimited | Maximum bytes of persisted KV block data. |
+ | `enable_kv_events` | no | `false` | Publish `BlockStored` KV events (medium `STORAGE`) for successfully stored blocks. Requires KV cache events to be enabled globally. |
+ | `locality` | no | unspecified | `LOCAL` or `REMOTE` relative to the publishing vLLM instance. Included in the tier's KV events only when explicitly configured. |
+ 
+ Each thread group prefers its own queue but pulls from the other when its primary queue is empty, so a write-heavy or read-heavy burst won't leave the off-priority queue waiting. Size the totals to your storage's effective concurrency.
+ 
++When `max_bytes` is set, the tier removes least recently used blocks before a
++store would exceed the limit. Blocks in an active load or store are protected.
++If a batch cannot fit safely, its cache write is skipped without failing the
++request. Existing block files are counted once when the tier starts. Omitting
++`max_bytes` preserves the historical unbounded behavior.
++
++The limit applies to this tier's mapped `<model>_<digest>_r<rank>` directory,
++not to the whole `root_dir` or all engines combined. Bounded mode requires
++exclusive ownership of that directory; concurrent engines sharing it are not
++supported. Accounting covers persisted block bytes, excluding temporary files,
++configuration and filesystem overhead. Restart recency is seeded from file
++modification times; runtime LRU history is not persisted.
++
+ #### On-Disk Layout
+ 
+ Under `root_dir`, vLLM creates a subdirectory `<model>_<digest>`, where `<model>` is the model name with `/` replaced by `_` (so HuggingFace IDs like `meta-llama/Llama-3-8B` don't nest), and `<digest>` is a short SHA256 prefix derived from the run configuration (model, block size, parallelism, dtype, etc.). Runs with the same configuration share the same subdirectory; runs with different configurations live side-by-side under the same `root_dir` without colliding.
+@@ -185,9 +200,11 @@ Inside that subdirectory, blocks are sharded across hash-prefix subdirectories t
+ 
+ #### Cross-Process Sharing
+ 
+-KV cache sharing between multiple vLLM instances using the same `root_dir` (e.g., via a shared PVC) works by default: `NONE_HASH` (the chain-hash seed for block content hashes) is derived from a fixed default seed, so identical token content produces identical block filenames across instances. To use a custom shared seed instead, set the `PYTHONHASHSEED` environment variable to the same value on every instance.
++For an unbounded filesystem tier (`max_bytes` unset), KV cache sharing between multiple vLLM instances using the same `root_dir` (e.g., via a shared PVC) works by default: `NONE_HASH` (the chain-hash seed for block content hashes) is derived from a fixed default seed, so identical token content produces identical block filenames across instances. To use a custom shared seed instead, set the `PYTHONHASHSEED` environment variable to the same value on every instance.
++
++This sharing guidance does not apply when `max_bytes` is set. Bounded filesystem tiers maintain independent in-memory capacity state, so each mapped directory must have exclusive ownership by one engine instance.
+ 
+-The exception is the non-cryptographic `xxhash` and `xxhash_cbor` values of `--prefix-caching-hash-algo`, which seed `NONE_HASH` randomly per process so the seed stays unpredictable. Sharing a cache across instances with those algorithms requires setting the same `PYTHONHASHSEED` on every instance.
++The exception is the non-cryptographic `xxhash` and `xxhash_cbor` values of `--prefix-caching-hash-algo`, which seed `NONE_HASH` randomly per process so the seed stays unpredictable. Sharing an unbounded cache across instances with those algorithms requires setting the same `PYTHONHASHSEED` on every instance.
+ 
+ ```bash
+ PYTHONHASHSEED=<shared-value> vllm serve ...
+diff --git a/tests/v1/kv_offload/tiering/test_fs_tier.py b/tests/v1/kv_offload/tiering/test_fs_tier.py
+index 9c3a64d22a..0f6a7b05f8 100644
+--- a/tests/v1/kv_offload/tiering/test_fs_tier.py
++++ b/tests/v1/kv_offload/tiering/test_fs_tier.py
+@@ -34,7 +34,7 @@ from vllm.v1.kv_offload.config import (
+     OffloadingModelConfig,
+     OffloadingParallelConfig,
+ )
+-from vllm.v1.kv_offload.tiering.base import TransferJob
++from vllm.v1.kv_offload.tiering.base import JobResult, TransferJob
+ from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
+ from vllm.v1.kv_offload.tiering.fs.manager import (
+     FileSystemTierManager,
+@@ -230,6 +230,205 @@ def test_store_creates_file_and_lookup_succeeds(fs_tier):
+     assert os.path.exists(dest), f"Expected file at {dest}"
+ 
+ 
++def make_bounded_tier(tmp_path, max_blocks=2):
++    tensor = _page_aligned_zero_tensor(_NUM_BLOCKS, _BLOCK_ELEMENTS)
++    tier = FileSystemTierManager(
++        offloading_spec=_MOCK_OFFLOADING_SPEC,
++        primary_kv_view=memoryview(tensor.numpy()),
++        tier_type="fs",
++        root_dir=str(tmp_path),
++        n_read_threads=2,
++        n_write_threads=2,
++        max_bytes=max_blocks * tensor.stride(0) * tensor.element_size(),
++    )
++    return tier, tensor
++
++
++@pytest.mark.parametrize("replacement_count", [1, 2])
++def test_bounded_tier_evicts_least_recently_used(tmp_path, replacement_count):
++    tier, _ = make_bounded_tier(tmp_path)
++    try:
++        tier.submit_store(make_job(1, [key(1), key(2)]))
++        assert all(result.success for result in drain(tier))
++        tier.touch([key(1)], _CTX)
++        tier.submit_store(make_job(2, [key(3 + i) for i in range(replacement_count)]))
++        assert all(result.success for result in drain(tier))
++
++        assert os.path.exists(tier.file_mapper.get_file_name(key(1))) == (
++            replacement_count == 1
++        )
++        assert not os.path.exists(tier.file_mapper.get_file_name(key(2)))
++        assert os.path.exists(tier.file_mapper.get_file_name(key(3)))
++        assert tier._cache_bytes <= tier.max_bytes
++    finally:
++        tier.shutdown()
++
++
++def test_bounded_tier_counts_partial_store_failure(tmp_path, monkeypatch):
++    import vllm.v1.kv_offload.tiering.fs.manager as manager_module
++
++    tier, _ = make_bounded_tier(tmp_path)
++    original = manager_module.batch_store_block
++
++    def partial_store(paths, view, offsets, *args):
++        original(paths[:1], view, offsets[:1], *args)
++        raise OSError("injected failure after first block")
++
++    try:
++        with monkeypatch.context() as patch:
++            patch.setattr(manager_module, "batch_store_block", partial_store)
++            tier.submit_store(make_job(1, [key(1), key(2)]))
++            assert not drain(tier)[0].success
++        assert tier.get_stats().reduce()[tier.CACHE_BYTES] == tier._block_size
++        tier.submit_store(make_job(2, [key(3), key(4)]))
++        assert drain(tier)[0].success
++        assert not os.path.exists(tier.file_mapper.get_file_name(key(1)))
++        assert tier.get_stats().reduce()[tier.CACHE_BYTES] == tier.max_bytes
++    finally:
++        tier.shutdown()
++
++
++def test_bounded_tier_skips_oversized_batch_without_eviction(tmp_path):
++    tier, _ = make_bounded_tier(tmp_path, max_blocks=1)
++    try:
++        tier.submit_store(make_job(1, [key(1)], [0]))
++        assert all(result.success for result in drain(tier))
++        tier.submit_store(make_job(2, [key(2), key(3)], [1, 2]))
++        assert not any(result.success for result in drain(tier))
++
++        assert os.path.exists(tier.file_mapper.get_file_name(key(1)))
++        assert not os.path.exists(tier.file_mapper.get_file_name(key(2)))
++        assert not os.path.exists(tier.file_mapper.get_file_name(key(3)))
++    finally:
++        tier.shutdown()
++
++
++def test_bounded_tier_does_not_evict_active_load(tmp_path, monkeypatch):
++    import vllm.v1.kv_offload.tiering.fs.manager as manager_module
++
++    tier, _ = make_bounded_tier(tmp_path)
++    started = threading.Event()
++    release = threading.Event()
++    original_load = manager_module.batch_load_block
++
++    def blocked_load(*args, **kwargs):
++        started.set()
++        assert release.wait(timeout=5)
++        return original_load(*args, **kwargs)
++
++    monkeypatch.setattr(manager_module, "batch_load_block", blocked_load)
++    try:
++        tier.submit_store(make_job(1, [key(1), key(2)]))
++        assert all(result.success for result in drain(tier))
++        tier.submit_load(make_job(2, [key(1)], [3], is_promotion=True))
++        assert started.wait(timeout=5)
++        tier.submit_store(make_job(3, [key(3)], [2]))
++
++        path3 = tier.file_mapper.get_file_name(key(3))
++        deadline = time.monotonic() + 5
++        while time.monotonic() < deadline and not os.path.exists(path3):
++            time.sleep(0.01)
++        assert os.path.exists(tier.file_mapper.get_file_name(key(1)))
++        assert not os.path.exists(tier.file_mapper.get_file_name(key(2)))
++        assert os.path.exists(path3)
++    finally:
++        release.set()
++        drain(tier)
++        tier.shutdown()
++
++
++def test_bounded_tier_restores_accounting_after_restart(tmp_path):
++    tier, tensor = make_bounded_tier(tmp_path)
++    tier.submit_store(make_job(1, [key(1), key(2)]))
++    assert all(result.success for result in drain(tier))
++    tier.shutdown()
++
++    restarted = FileSystemTierManager(
++        offloading_spec=_MOCK_OFFLOADING_SPEC,
++        primary_kv_view=memoryview(tensor.numpy()),
++        tier_type="fs",
++        root_dir=str(tmp_path),
++        max_bytes=2 * tensor.stride(0) * tensor.element_size(),
++    )
++    try:
++        assert restarted._cache_bytes == restarted.max_bytes
++        restarted.submit_store(make_job(2, [key(3)], [2]))
++        assert all(result.success for result in drain(restarted))
++        assert restarted._cache_bytes <= restarted.max_bytes
++    finally:
++        restarted.shutdown()
++
++
++def test_bounded_tier_stats_do_not_scan_filesystem(tmp_path, monkeypatch):
++    tier, _ = make_bounded_tier(tmp_path)
++    try:
++        tier.submit_store(make_job(1, [key(1)], [0]))
++        assert all(result.success for result in drain(tier))
++        monkeypatch.setattr(os, "walk", MagicMock(side_effect=AssertionError))
++
++        with tier._capacity_lock:
++            stats = tier.get_stats()
++        assert stats is not None
++        reduced = stats.reduce()
++        assert reduced[tier.CACHE_BYTES] == tier._block_size
++        assert reduced[tier.CACHE_ENTRIES] == 1
++    finally:
++        tier.shutdown()
++
++
++def test_bounded_tier_keeps_protection_until_last_reader(tmp_path, monkeypatch):
++    import vllm.v1.kv_offload.tiering.fs.manager as module
++
++    tier, _ = make_bounded_tier(tmp_path, max_blocks=1)
++    gate = threading.Event()
++    started = threading.Event()
++    original = module.batch_load_block
++
++    def load(paths, view, offsets, *args):
++        if offsets[0] == 2 * tier._block_size:
++            started.set()
++            assert gate.wait(10)
++        return original(paths, view, offsets, *args)
++
++    try:
++        tier.submit_store(make_job(1, [key(1)], [0]))
++        assert drain(tier)[0].success
++        monkeypatch.setattr(module, "batch_load_block", load)
++        tier.submit_load(make_job(2, [key(1)], [2], is_promotion=True))
++        assert started.wait(5)
++        tier.submit_load(make_job(3, [key(1)], [3], is_promotion=True))
++        results: dict[int, JobResult] = {}
++        deadline = time.monotonic() + 5
++        while 3 not in results and time.monotonic() < deadline:
++            results.update((r.job_id, r) for r in tier.get_finished_jobs())
++            time.sleep(0.01)
++        assert results[3].success
++        tier.submit_store(make_job(4, [key(2)], [1]))
++        while 4 not in results and time.monotonic() < deadline:
++            results.update((r.job_id, r) for r in tier.get_finished_jobs())
++            time.sleep(0.01)
++        assert not results[4].success
++        assert os.path.exists(tier.file_mapper.get_file_name(key(1)))
++    finally:
++        gate.set()
++        drain(tier)
++        tier.shutdown()
++
++
++@pytest.mark.parametrize("max_bytes", [-1, 1.5, True])
++def test_bounded_tier_rejects_invalid_capacity(tmp_path, max_bytes):
++    tensor = _page_aligned_zero_tensor(1, _BLOCK_ELEMENTS)
++    error = ValueError if max_bytes == -1 else TypeError
++    with pytest.raises(error, match="max_bytes"):
++        FileSystemTierManager(
++            offloading_spec=_MOCK_OFFLOADING_SPEC,
++            primary_kv_view=memoryview(tensor.numpy()),
++            tier_type="fs",
++            root_dir=str(tmp_path),
++            max_bytes=max_bytes,
++        )
++
++
+ def test_store_then_load_roundtrip(fs_tier):
+     tier, _ = fs_tier
+     job_s = make_job(1, [key(1), key(2)], [0, 1])
+diff --git a/vllm/v1/kv_offload/tiering/fs/manager.py b/vllm/v1/kv_offload/tiering/fs/manager.py
+index 6522cfd236..f8d010e027 100644
+--- a/vllm/v1/kv_offload/tiering/fs/manager.py
++++ b/vllm/v1/kv_offload/tiering/fs/manager.py
+@@ -17,8 +17,10 @@ File naming:  <base_path>_r<rank>/<hhh>/<hh>_g<group_idx>/<hash_hex>.bin
+ import functools
+ import json
+ import os
+-from collections.abc import Iterable
+-from typing import TYPE_CHECKING, ClassVar
++import threading
++from collections import Counter, OrderedDict
++from collections.abc import Collection, Iterable
++from typing import TYPE_CHECKING, Any, ClassVar
+ 
+ try:
+     from vllm.fs_io_C import batch_lookup as batch_lookup_C
+@@ -29,14 +31,20 @@ except ImportError:
+ 
+ from typing_extensions import override
+ 
++from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
++    OffloadingConnectorStats,
++)
+ from vllm.logger import init_logger
+ from vllm.v1.kv_offload.base import (
+     Locality,
+     LookupResult,
+     Medium,
+     OffloadingEvent,
++    OffloadingGaugeMetadata,
++    OffloadingMetricMetadata,
+     OffloadKey,
+     ReqContext,
++    make_offload_key,
+ )
+ from vllm.v1.kv_offload.file_mapper import FileMapper
+ from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager
+@@ -105,6 +113,22 @@ class FileSystemTierManager(SecondaryTierManager):
+     """
+ 
+     medium: ClassVar[Medium] = Medium.STORAGE
++    CACHE_BYTES = "vllm:kv_offload_fs_cache_bytes"
++    CACHE_ENTRIES = "vllm:kv_offload_fs_cache_entries"
++
++    @classmethod
++    def build_metric_definitions(
++        cls, extra_config: dict[str, Any]
++    ) -> dict[str, OffloadingMetricMetadata]:
++        del extra_config
++        return {
++            cls.CACHE_BYTES: OffloadingGaugeMetadata(
++                documentation="Current filesystem KV cache block-data bytes."
++            ),
++            cls.CACHE_ENTRIES: OffloadingGaugeMetadata(
++                documentation="Current filesystem KV cache block entry count."
++            ),
++        }
+ 
+     def __init__(
+         self,
+@@ -116,6 +140,7 @@ class FileSystemTierManager(SecondaryTierManager):
+         n_write_threads: int = 16,
+         enable_kv_events: bool = False,
+         locality: str | None = None,
++        max_bytes: int | None = None,
+         backpressure_detector: BackpressureDetector | None = None,
+     ):
+         """Args:
+@@ -133,10 +158,19 @@ class FileSystemTierManager(SecondaryTierManager):
+             to the publishing vLLM instance.
+         backpressure_detector: Optional backpressure detector.
+ 
++            max_bytes: Maximum block-data bytes stored by this filesystem tier.
++                ``None`` preserves the historical unbounded behavior.
+         """
+         super().__init__(
+             offloading_spec, primary_kv_view, tier_type, backpressure_detector
+         )
++        if isinstance(max_bytes, bool) or (
++            max_bytes is not None and not isinstance(max_bytes, int)
++        ):
++            raise TypeError("max_bytes must be a non-negative integer or None")
++        if max_bytes is not None and max_bytes < 0:
++            raise ValueError("max_bytes must be a non-negative integer or None")
++        self.max_bytes = max_bytes
+         self.locality = Locality(locality) if locality is not None else None
+ 
+         self.events: list[OffloadingEvent] | None = None
+@@ -164,6 +198,9 @@ class FileSystemTierManager(SecondaryTierManager):
+         # the GIL that read cannot observe the finished job without the prior
+         # write, so no extra lock is needed (get_finished is itself lock-free).
+         self._load_progress: dict[JobId, int] = {}
++        self._load_paths: dict[JobId, list[str]] = {}
++        self._skipped_store_jobs: set[JobId] = set()
++        self._evicted_store_keys: dict[JobId, list[OffloadKey]] = {}
+ 
+         # Extract block size from primary view
+         assert primary_kv_view.strides is not None, (
+@@ -178,6 +215,13 @@ class FileSystemTierManager(SecondaryTierManager):
+             blocks_per_file=offloading_spec.blocks_per_chunk,
+             parallel_agnostic=True,
+         )
++        self._storage_dir = f"{self.file_mapper.base_path}_r{self.file_mapper.rank}"
++        self._capacity_lock = threading.Lock()
++        self._entries: OrderedDict[str, int] = OrderedDict()
++        self._cache_bytes = 0
++        self._reserved_bytes = 0
++        self._protected_paths: Counter[str] = Counter()
++        self._writing_paths: set[str] = set()
+ 
+         # Write config file
+         config_path = self.file_mapper.get_config_file_path()
+@@ -188,6 +232,13 @@ class FileSystemTierManager(SecondaryTierManager):
+                     self.file_mapper.get_run_config(), f, indent=2, sort_keys=True
+                 )
+ 
++        if max_bytes is not None:
++            self._scan_cache()
++            with self._capacity_lock:
++                self._evict_locked(max(self._cache_bytes - max_bytes, 0), set())
++            if self._cache_bytes > max_bytes:
++                raise OSError("Cannot reduce existing filesystem cache to max_bytes")
++
+         # Prefer O_DIRECT to bypass the page cache, but fall back to buffered
+         # I/O on filesystems that reject it (e.g. overlayfs, some NFS mounts)
+         # rather than failing every block.
+@@ -219,18 +270,176 @@ class FileSystemTierManager(SecondaryTierManager):
+             return LookupResult.RETRY
+         return LookupResult.HIT if result else LookupResult.MISS
+ 
++    def _scan_cache(self) -> None:
++        """Build the LRU index once at startup from file modification times."""
++        entries = []
++        if os.path.isdir(self._storage_dir):
++            for dirpath, _, filenames in os.walk(self._storage_dir):
++                for filename in filenames:
++                    if not filename.endswith(".bin"):
++                        continue
++                    path = os.path.join(dirpath, filename)
++                    try:
++                        stat = os.stat(path)
++                    except FileNotFoundError:
++                        continue
++                    entries.append((stat.st_mtime_ns, path, stat.st_size))
++        entries.sort()
++        self._entries.update((path, size) for _, path, size in entries)
++        self._cache_bytes = sum(self._entries.values())
++
++    @staticmethod
++    def _path_key(path: str) -> OffloadKey | None:
++        try:
++            group_dir = os.path.basename(os.path.dirname(path))
++            group_idx = int(group_dir.rsplit("_g", 1)[1])
++            block_hash = bytes.fromhex(os.path.basename(path)[:-4])
++            return make_offload_key(block_hash, group_idx)
++        except (IndexError, ValueError):
++            return None
++
++    def _evict_locked(
++        self, bytes_to_free: int, protected: set[str]
++    ) -> tuple[list[OffloadKey], int]:
++        if bytes_to_free <= 0:
++            return [], 0
++        evicted = []
++        freed = 0
++        candidates = []
++        available = 0
++        for path, size in self._entries.items():
++            if path in protected or path in self._protected_paths:
++                continue
++            candidates.append((path, size))
++            available += size
++            if available >= bytes_to_free:
++                break
++        if available < bytes_to_free:
++            return [], 0
++        for path, size in candidates:
++            if freed >= bytes_to_free:
++                break
++            try:
++                os.remove(path)
++            except FileNotFoundError:
++                pass
++            except OSError:
++                continue
++            self._entries.pop(path, None)
++            self._cache_bytes -= size
++            freed += size
++            key = self._path_key(path)
++            if key is not None:
++                evicted.append(key)
++        return evicted, freed
++
++    def _store_batch(self, job_id: JobId, paths: list[str], offsets: list[int]) -> None:
++        if self.max_bytes is None:
++            batch_store_block(
++                paths,
++                self._primary_kv_view,
++                offsets,
++                self._block_size,
++                self._use_o_direct,
++            )
++            return
++        unique = dict(zip(paths, offsets))
++        with self._capacity_lock:
++            if self._writing_paths.intersection(unique):
++                self._skipped_store_jobs.add(job_id)
++                return
++            missing = []
++            for path, offset in unique.items():
++                if path in self._entries and not os.path.exists(path):
++                    self._cache_bytes -= self._entries.pop(path)
++                if path in self._entries:
++                    self._entries.move_to_end(path)
++                elif os.path.exists(path):
++                    try:
++                        size = os.path.getsize(path)
++                    except OSError:
++                        missing.append((path, offset))
++                    else:
++                        self._entries[path] = size
++                        self._cache_bytes += size
++                else:
++                    missing.append((path, offset))
++
++            needed = len(missing) * self._block_size
++            if self.max_bytes is not None:
++                if needed > self.max_bytes:
++                    self._skipped_store_jobs.add(job_id)
++                    logger.warning(
++                        "Skipping filesystem KV cache store for job %s: "
++                        "the batch does not fit in max_bytes=%s.",
++                        job_id,
++                        self.max_bytes,
++                    )
++                    return
++                required = max(
++                    self._cache_bytes + self._reserved_bytes + needed - self.max_bytes,
++                    0,
++                )
++                evicted, freed = self._evict_locked(required, set(unique))
++                if evicted:
++                    self._evicted_store_keys[job_id] = evicted
++                required -= freed
++                if required > 0:
++                    self._skipped_store_jobs.add(job_id)
++                    logger.warning(
++                        "Skipping filesystem KV cache store for job %s: "
++                        "the batch does not fit in max_bytes=%s.",
++                        job_id,
++                        self.max_bytes,
++                    )
++                    return
++            if not missing:
++                return
++            store_paths = [path for path, _ in missing]
++            self._reserved_bytes += needed
++            self._protected_paths.update(store_paths)
++            self._writing_paths.update(store_paths)
++
++        try:
++            batch_store_block(
++                store_paths,
++                self._primary_kv_view,
++                [offset for _, offset in missing],
++                self._block_size,
++                self._use_o_direct,
++            )
++        finally:
++            with self._capacity_lock:
++                self._reserved_bytes -= needed
++                self._unprotect(store_paths)
++                self._writing_paths.difference_update(store_paths)
++                for path in store_paths:
++                    try:
++                        size = os.path.getsize(path)
++                    except FileNotFoundError:
++                        size = 0
++                    except OSError:
++                        size = self._block_size
++                    self._cache_bytes += size - self._entries.pop(path, 0)
++                    if size:
++                        self._entries[path] = size
++
++    def _unprotect(self, paths: Iterable[str]) -> None:
++        for path in paths:
++            self._protected_paths[path] -= 1
++            if self._protected_paths[path] == 0:
++                del self._protected_paths[path]
++
+     @override
+     def submit_store(self, job_metadata: TransferJob) -> None:
+         keys = list(job_metadata.keys)
+         if self.events is not None:
+             self._store_job_keys[job_metadata.job_id] = keys
+         task = functools.partial(
+-            batch_store_block,
++            self._store_batch,
++            job_metadata.job_id,
+             [self.file_mapper.get_file_name(key) for key in keys],
+-            self._primary_kv_view,
+             [int(cid) * self._block_size for cid in job_metadata.chunk_ids],
+-            self._block_size,
+-            self._use_o_direct,
+         )
+         self._job_block_counts[job_metadata.job_id] = len(keys)
+         self._pool.enqueue_store(job_metadata.job_id, 1, [task])
+@@ -244,6 +453,10 @@ class FileSystemTierManager(SecondaryTierManager):
+         self._load_job_keys[job_id] = keys
+         self._job_block_counts[job_id] = len(keys)
+         paths = [self.file_mapper.get_file_name(key) for key in keys]
++        if self.max_bytes is not None:
++            self._load_paths[job_id] = paths
++            with self._capacity_lock:
++                self._protected_paths.update(paths)
+         offsets = [int(cid) * self._block_size for cid in job_metadata.chunk_ids]
+ 
+         def load_task() -> None:
+@@ -281,11 +494,26 @@ class FileSystemTierManager(SecondaryTierManager):
+         as a miss here (scheduler thread)."""
+         results = []
+         for job_id, success, transfer_time in self._pool.get_finished():
++            with self._capacity_lock:
++                self._unprotect(self._load_paths.pop(job_id, ()))
++                skipped = job_id in self._skipped_store_jobs
++                self._skipped_store_jobs.discard(job_id)
++                evicted = self._evicted_store_keys.pop(job_id, ())
++            success = success and not skipped
+             block_count = self._job_block_counts.pop(job_id, 0)
+             transfer_bytes = block_count * self._block_size if block_count else None
+             if self.events is not None:
+                 keys = self._store_job_keys.pop(job_id, None)
+-                if success and keys:
++                if evicted:
++                    self.events.append(
++                        OffloadingEvent(
++                            keys=evicted,
++                            medium=self.medium,
++                            removed=True,
++                            locality=self.locality,
++                        )
++                    )
++                if success and keys and not skipped:
+                     self.events.append(
+                         OffloadingEvent(
+                             keys=keys,
+@@ -324,6 +552,26 @@ class FileSystemTierManager(SecondaryTierManager):
+             )
+         return results
+ 
++    @override
++    def touch(self, keys: Collection[OffloadKey], req_context: ReqContext) -> None:
++        del req_context
++        if self.max_bytes is None:
++            return
++        with self._capacity_lock:
++            for key in keys:
++                path = self.file_mapper.get_file_name(key)
++                if path in self._entries:
++                    self._entries.move_to_end(path)
++
++    @override
++    def get_stats(self) -> OffloadingConnectorStats | None:
++        if self.max_bytes is None:
++            return None
++        stats = OffloadingConnectorStats()
++        stats.set_gauge(self.CACHE_BYTES, self._cache_bytes)
++        stats.set_gauge(self.CACHE_ENTRIES, len(self._entries))
++        return stats
++
+     @override
+     def take_events(self) -> Iterable[OffloadingEvent]:
+         if self.events is not None:
