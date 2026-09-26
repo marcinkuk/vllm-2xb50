@@ -150,6 +150,94 @@ git apply patches/vllm-mtp-draft-group-annotation-55390-56026.patch
   before each build: once **#55390 and #56026 are both merged**, delete this
   patch and the build.sh step — main will carry the fix natively.
 
+## patches/fs-tier-max-bytes-54327.patch
+
+Vendored copy of **upstream PR #54327** — `[Feature][KV Offload] Add bounded
+capacity and LRU eviction to the filesystem tier`. Adds an optional
+`max_bytes` bound to the fs (disk) KV tier so it evicts least-recently-used
+blocks instead of writing until the volume's disk quota is exhausted.
+
+- **Upstream status (re-checked 2026-09-26):** PR #54327 is **OPEN / unmerged
+  (mergeable_state: blocked)** (head `8cd8ebf1`, base `10e6a7f2`). This file is
+  a byte-identical vendored copy of that head, re-verified to `git apply`
+  cleanly on newest vllm `main @ 31f2e70cd` (2026-09-26, re-checked after the
+  09-25 incident; also clean on `3b4566c5cf`);
+  fs-tier test suite on the patched tree (CPU sandbox, re-run on `31f2e70cd`):
+  **44 passed / 11 skipped, 0 failed** — the 11 new bounded-capacity tests
+  all pass (baseline on unpatched `31f2e70cd`: 33 passed / 11 skipped; the
+  55/44 "errors" are teardown-only `torch.accelerator.empty_cache` failures
+  from running on a CPU-only box, present identically in both runs).
+- **Why it is needed:** with `--kv-transfer-config` pointing an fs tier at a
+  quota'd volume (the `/vllm_prefix_cache` PVC), the *unbounded* fs tier keeps
+  storing KV blocks until the per-directory disk quota is hit. The 2026-09-25
+  production log shows `123x [Errno 122] "Disk quota exceeded"` + `129`
+  short-write errors, **all in the rank-0 dir** `<model>_<digest>_r0`. The tier
+  was doing its job (external prefix-cache hit 23.7-92.1%, cumulative
+  store_bytes 25.6 GiB vs load_bytes 310 GiB) — it just had no capacity bound,
+  so it ate the quota. XPU KV usage peaked at 96% but was **not** the cause.
+- **What it does:** adds `max_bytes: int | None = None` to the fs-tier manager
+  (`vllm/v1/kv_offload/tiering/fs/manager.py`) plus LRU/byte accounting. When
+  set, the tier evicts least-recently-used blocks before a store that would
+  exceed the bound (blocks in an active load/store are protected); if a batch
+  still cannot fit, its cache write is skipped **without failing the request**.
+  Omitting `max_bytes` preserves the historical unbounded behavior. The tier
+  factory (`tiering/factory.py`) forwards any extra fs-entry keys, including
+  `max_bytes`, to the constructor.
+- **Scope / caveats:** the bound is per mapped `<model>_<digest>_r<rank>`
+  directory — **not** per `root_dir` or all engines combined — and bounded mode
+  requires **exclusive ownership** of that directory (concurrent engines sharing
+  one dir are not supported in bounded mode). Accounting covers persisted block
+  bytes only (excludes temp files / fs overhead); on restart, recency is seeded
+  from file mtimes (runtime LRU history is not persisted).
+- **Applied by `build-graph.sh` as step `9c`** (last in the 8-patch chain; image
+  tag gets `-fstier`). It touches only `vllm/v1/kv_offload/tiering/fs/manager.py`
+  + its test + the usage doc, which no earlier patch modifies, so it is
+  order-independent from the rest of the chain. **Once #54327 is MERGED
+  upstream, drop step `9c`** — main will carry it natively.
+
+### Enabling `max_bytes` (the patch is inert without it)
+
+The patch ships no behavior until you set `max_bytes` on the fs-tier entry in
+the serve `--kv-transfer-config`:
+
+```
+--kv-transfer-config '{
+  "kv_connector": "OffloadingConnector",
+  "kv_role": "kv_both",
+  "kv_connector_extra_config": {
+    "spec_name": "TieringOffloadingSpec",
+    "cpu_bytes_to_use": 12884901888,
+    "secondary_tiers": [{
+      "type": "fs",
+      "root_dir": "/vllm_prefix_cache",
+      "n_read_threads": 8,
+      "n_write_threads": 8,
+      "max_bytes": <per-rank-dir byte cap>      <-- add this key
+    }]
+  }
+}'
+```
+
+No other flag is required; the factory forwards the extra key to the manager.
+
+### Sizing `max_bytes`
+
+Size the cap **at or below the per-directory disk quota of the volume** (the
+limit that was raising `[Errno 122]`), with headroom so LRU eviction happens
+*before* the kernel quota error:
+
+- First identify the failing volume's per-dir quota (e.g. the `vllm_prefix_cache`
+  PVC size, or the `xfs_quota`/project limit on the underlying filesystem) — the
+  09-25 log did not print it, so confirm it on the host.
+- Set `max_bytes` to roughly **75-90%** of that per-dir quota, leaving room for
+  in-flight protected blocks and temp files.
+- The cap is **per rank dir**: a `--tensor-parallel-size 2` build writes to two
+  sibling dirs (`_r0`, `_r1`). If the quota is *per directory*, each rank can take
+  its own full cap; if it is a *single aggregate* quota on `root_dir`, split the
+  cap across the ranks.
+- Start with the failing `_r0` dir, confirm no further `[Errno 122]` after a
+  restart, then raise it toward the quota as confidence grows.
+
 ## Tests
 
 `testy/symm_rendezvous_test.py` — checks whether the torch symmetric-memory
