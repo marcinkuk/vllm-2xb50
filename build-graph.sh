@@ -267,6 +267,34 @@
 #   window 09-25 09:07..11:13) re-confirmed 123x [Errno 122] + 129
 #   "Short write: expected 55705600 bytes, wrote 33685504" I/O failures, all in
 #   the <model>_<digest>_r0 dir — the exact failure [9c] fstier bounds.
+#   RE-VERIFIED 2026-09-30: full 8-patch chain strict `git apply` clean on
+#   newest vllm main @ c4df37d (2026-09-30; v0.30.1rc0 tagged at 2df122e6).
+#   The two commits since fc2c801a (cff08b4 GHSA-4hhp-h66f chat-template DoS
+#   fix, c4df37d ROCm mori-build) touch no patch-era file (the envs.py diff
+#   is +6 unrelated lines), so the re-hunk is valid 5463fe49 .. c4df37d.
+#   ONE re-hunk needed: [2] mtpeagle — upstream #57652 (5463fe49, merged
+#   2026-09-30, "Expand replicated_layout detection to multi-group MLA")
+#   appended test_kv_cache_groups_tp_replicas to the END of
+#   tests/v1/core/test_kv_cache_utils.py, breaking the patch's EOF-anchored
+#   test hunk (@@ -4383,3). kv_cache_utils.py was untouched by #57652 and
+#   still applied at the same offset; only the test hunk's anchor/context
+#   re-aimed (@@ -4734,3), all 54 added lines byte-identical, verified
+#   blob-for-blob against 2df122e6/fc2c801a (the two test+kvutils blobs are
+#   identical on both tips). Because the re-anchored test pre-image only
+#   exists from 5463fe49 onward, the step-1b era-gate now checks a SECOND
+#   marker, kv_cache_groups_tp_replicas in kv_cache_utils.py (introduced by
+#   #57652; proven absent at 5463fe49^): era is now 5463fe49 .. c4df37d.
+#   (The original 09-30 dry-run caught exactly this FATAL before any other
+#   patch was tried.) PR states re-checked 2026-09-30: #56026 / #53990 /
+#   #53997 / #57128 / #54327 / #54768 all still OPEN (no activity); #55390 /
+#   #51600 still MERGED; issues #53912 / #56917 still OPEN. envs.py/xpu.py
+#   moved again since 8b660ce96 (ROCm/GLM/KV-offloading only) —
+#   VLLM_XPU_ENABLE_XPU_GRAPH still absent from envs.py, so [8] stays
+#   DISABLED (re-enable only after a live B50/B70 canary of
+#   VLLM_XPU_TRITON_ALLREDUCE=1) and [9] stays DROPPED. Watch: #57128 merge
+#   -> drop [7b]; #54327 merge -> drop [9c]; #56026 merge -> drop [2] and
+#   relax the era-gate (kv_cache_groups_tp_replicas stays a hard marker only
+#   while the re-anchored test pre-image depends on the #57652 EOF).
 
 # 1. Hard reset to a clean state and pull the latest upstream code
 docker builder prune -a -f
@@ -289,25 +317,37 @@ V=marcinkuk/vllm-2xb50   # this repo — single source of the patches
 #     not apply". (This is the "patch no longer applies" guard, made specific.)
 #     The [2] mtpeagle patch is the #56026 delta ON TOP of merged #55390
 #     (0bce411a, 2026-09-22), so its two files (kv_cache_utils.py and its test)
-#     only match main from that merge onward — verified blob-for-blob from
-#     0bce411a through e33de821c (2026-09-24). The VLLM_BATCH_INVARIANT marker
-#     (#55881) was the anchor of the now-DISABLED [8] tritonar patch, so it is
-#     no longer a build requirement (it is still in main; kept here for
-#     reference only, not checked).
+#     only match main from that merge onward. Since the 2026-09-30 re-hunk the
+#     test hunk is anchored on the EOF that #57652 (5463fe49, merged
+#     2026-09-30) appended — test_kv_cache_groups_tp_replicas, whose helper
+#     kv_cache_groups_tp_replicas() it calls landed in kv_cache_utils.py in
+#     that same commit — so the pre-image now REQUIRES main at/after 5463fe49.
+#     Two era markers are checked: _uses_trailing_mtp_layers (the #55390
+#     merge, 0bce411a) and kv_cache_groups_tp_replicas (the #57652 merge,
+#     5463fe49) — the latter is the binding one. The VLLM_BATCH_INVARIANT
+#     marker (#55881) was the anchor of the now-DISABLED [8] tritonar patch,
+#     so it is no longer a build requirement (it is still in main; kept here
+#     for reference only, not checked).
 era_ok=1
 for marker in \
-  "vllm/v1/core/kv_cache_utils.py:_uses_trailing_mtp_layers"; do
+  "vllm/v1/core/kv_cache_utils.py:_uses_trailing_mtp_layers" \
+  "vllm/v1/core/kv_cache_utils.py:kv_cache_groups_tp_replicas"; do
   f="${marker%%:*}"; pat="${marker##*:}"
   if ! git grep -q "$pat" -- "$f"; then
     era_ok=0
-    echo "NOTE: base ${HASH} predates the #55390 merge (0bce411a, 2026-09-22)."
+    if [ "$pat" = "kv_cache_groups_tp_replicas" ]; then
+      echo "NOTE: base ${HASH} predates the #57652 merge (5463fe49, 2026-09-30)."
+    else
+      echo "NOTE: base ${HASH} predates the #55390 merge (0bce411a, 2026-09-22)."
+    fi
   fi
 done
 if [ "$era_ok" != 1 ]; then
   echo "FATAL: base ${HASH} is outside the verified patch era (needs main at/after"
-  echo "       0bce411a, the #55390 merge, 2026-09-22). Fix: 'git fetch origin &&"
+  echo "       5463fe49, the #57652 merge, 2026-09-30 — the [2] mtpeagle test"
+  echo "       hunk is anchored on the EOF #57652 appended). Fix: 'git fetch origin &&"
   echo "       git reset --hard origin/main' and re-run. Known-good main for"
-  echo "       this patch set: 0bce411a (2026-09-22) .. e33de821c (2026-09-24,"
+  echo "       this patch set: 5463fe49 (2026-09-30) .. c4df37d (2026-09-30,"
   echo "       verified)."
   exit 1
 fi
@@ -318,15 +358,22 @@ fi
 #    #56026 delta remains. It flags every KV group holding a separately-prefixed
 #    drafter's layers as a draft group, and keys the all-groups draft fallback
 #    warning on use_eagle_block_drop(). Standalone git-format patch; re-hunked
-#    onto current main c961121519 (2026-09-23).
+#    onto current main c4df37d (2026-09-30). Re-hunk 09-30: #57652 (5463fe49)
+#    appended test_kv_cache_groups_tp_replicas to the END of
+#    test_kv_cache_utils.py, which shifted this patch's EOF-anchored test hunk
+#    (kv_cache_utils.py itself was untouched by #57652 and still applies at the
+#    same offset) — only the test hunk's anchor/context changed, all 54 added
+#    lines are byte-identical to the 2026-09-23 re-hunk.
 curl -L "https://raw.githubusercontent.com/${V}/main/patches/0001-56026-on-current-main.patch" -o /tmp/mtpeagle.patch
 git apply /tmp/mtpeagle.patch || { echo "FATAL: 56026 patch no longer applies on ${HASH}."; \
   echo "       The 56026 patch is the #56026 delta ON TOP of merged #55390 (0bce411a);" \
   echo "       its two files (kv_cache_utils.py, test_kv_cache_utils.py) must match main" \
-  echo "       blob-for-blob, verified for 0bce411a .. 8b660ce96. Upstream drift:" \
-  echo "       re-hunk the patch onto current main (update the 'index' hashes) and" \
-  echo "       re-run. (If you saw 'mtpeagle (55390+56026)' here, your script copy is" \
-  echo "       stale — pull this repo and re-run; #55390 is merged, patch is split.)"; exit 1; }
+  echo "       blob-for-blob, verified for 5463fe49 .. c4df37d (2026-09-30). Upstream" \
+  echo "       drift: re-hunk the patch onto current main (update the 'index' hashes and" \
+  echo "       the hunk line numbers) and re-run; if the new drift lands in the test" \
+  echo "       file's EOF again, only the test hunk's anchor needs re-aiming. (If you saw" \
+  echo "       'mtpeagle (55390+56026)' here, your script copy is stale — pull this repo" \
+  echo "       and re-run; #55390 is merged, patch is split.)"; exit 1; }
 NAME=${NAME}-mtpeagle
 
 # 3. Vision-tower CPU offload (VLLM_VISION_CPU_OFFLOAD_GB). Not upstream.

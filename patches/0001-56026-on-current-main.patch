@@ -15,21 +15,23 @@ is what KVCacheManager actually receives.
 
 Signed-off-by: Windless84 <15976122+Windless84@users.noreply.github.com>
 (cherry picked from commit 4a365dee4aed8ae3135213b4cf6ce04f6d82e756)
-(rebased onto vllm main c961121519 - 2026-09-23; #55390 is now merged upstream,
- so this patch carries ONLY the #56026 delta on top of current main)
+(rebased onto vllm main fc2c801a - 2026-09-30; #55390 is merged upstream,
+ so this patch carries ONLY the #56026 delta on top of current main.
+ Test hunk re-anchored onto the EOF that #57652 (5463fe49, merged
+ 2026-09-30) appended to test_kv_cache_utils.py; patch era now starts at 5463fe49.)
 ---
  tests/v1/core/test_kv_cache_utils.py | 54 +++++++++++++++++++++++++++
  vllm/v1/core/kv_cache_utils.py       | 71 ++++++++++++++++++++++++++++++------
  2 files changed, 113 insertions(+), 12 deletions(-)
 
 diff --git a/tests/v1/core/test_kv_cache_utils.py b/tests/v1/core/test_kv_cache_utils.py
-index bc2a761d86..079c6e63da 100644
+index 0c56e89d..dfab33e5 100644
 --- a/tests/v1/core/test_kv_cache_utils.py
 +++ b/tests/v1/core/test_kv_cache_utils.py
-@@ -4383,3 +4383,57 @@ def test_trailing_layer_fallback_requires_exact_partition():
-     _annotate_eagle_groups(config, specs, trimmed, use_trailing_layer_fallback=True)
- 
-     assert not any(g.is_eagle_group for g in trimmed)
+@@ -4734,3 +4734,57 @@ def test_kv_cache_groups_tp_replicas(specs, tp_size, dcp_size, expected):
+     """Replicas are the gcd of each layer's tp_size // max_tp_shards."""
+     groups = [KVCacheGroupSpec([f"l.{i}"], spec) for i, spec in enumerate(specs)]
+     assert kv_cache_groups_tp_replicas(groups, tp_size, dcp_size) == expected
 +
 +
 +
