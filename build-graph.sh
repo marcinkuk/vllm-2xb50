@@ -58,11 +58,9 @@
 #                     prefill loop, supports_spec_as_decode=False), so
 #                     garbage attention was baked into the graph. This
 #                     downgrades the level to UNIFORM_SINGLE_TOKEN_DECODE so
-#                     verify batches run uncaptured, correctly. INERT unless
-#                     the serve command passes a turboquant_* --kv-cache-
-#                     dtype (default bf16 KV never instantiates the TQ
-#                     backend). Self-contained (one file, no overlap with
-#                     [1]-[9d]). Applied last; drop when #53406 merges.
+#                     verify batches run uncaptured, correctly. Self-contained
+#                     (one file, no overlap with [1]-[9d]). Applied last; drop
+#                     when #53406 merges.
 #   [8] tritonar  : DISABLED 2026-09-24 — TP=2 one-shot Triton symmetric-
 #                   memory allreduce (opt-in VLLM_XPU_TRITON_ALLREDUCE,
 #                   upstream analog #54768 still open). Never functional on
@@ -77,9 +75,9 @@
 #   pass --enforce-eager to run the eager baseline / canary. [9c] fstier
 #   needs no env either, but it is INERT unless the serve --kv-transfer-
 #   config fs tier sets "max_bytes" (see step 9c and the patch README).
-#   [9e] turboquantspec is INERT unless the serve command passes a
-#   turboquant_* --kv-cache-dtype (see the final echo); it is a PREREQUISITE
-#   for TurboQuant + MTP on this stack (issue #52475).
+#   [9e] turboquantspec (PR #53406) fixes TurboQuant + MTP (issue #52475); it
+#   takes effect when the serve command passes a turboquant_* --kv-cache-dtype
+#   (see the final echo).
 #
 # NOTE on patch [8] tritonar (DISABLED in the build since 2026-09-24, see step
 #   8): when/if re-enabled, it ADDS new files (xpu_triton_all_reduce.py etc).
@@ -614,7 +612,7 @@ NAME=${NAME}-hybridprefill
 #     hybrid + MTP — this exact model family). This downgrades the level to
 #     UNIFORM_SINGLE_TOKEN_DECODE: verify batches run uncaptured (correct),
 #     pure 1-token decodes still capture (no decode-throughput change).
-#     INERT unless the serve command passes a turboquant_* --kv-cache-dtype
+#     Applies when the serve command passes a turboquant_* --kv-cache-dtype
 #     (default bf16 KV never instantiates the TQ backend) — see the final
 #     echo. Self-contained: it only touches turboquant_attn.py, which no
 #     earlier patch in the chain modifies, so it applies cleanly on top of
@@ -662,11 +660,11 @@ echo "     The bound is per <model>_<digest>_r<rank> dir and requires exclusive"
 echo "     ownership of it (no multi-engine sharing in bounded mode). Size it to"
 echo "     the volume's per-dir quota so LRU eviction happens BEFORE [Errno 122] quota."
 echo "[9e] turboquantspec (PR #53406) is the MTP-safety fix for the TurboQuant"
-echo "     attention backend and is INERT unless you actually serve with a"
-echo "     turboquant_* KV cache dtype, e.g.:"
+echo "     attention backend; it is active when the serve command uses a"
+echo "     turboquant_* --kv-cache-dtype, e.g.:"
 echo "       --kv-cache-dtype turboquant_4bit_nc   (4-bit keys w/ norm-corr | 4-bit values,"
 echo "         the balanced default; 'nc' = norm correction)"
 echo "       or turboquant_k8v4 (8-bit keys) / turboquant_k3v4_nc (3-bit keys) / turboquant_3bit_nc."
-echo "     WITHOUT this patch, TurboQuant + MTP (n=3) repetition-collapses or IMA (issue #52475)."
-echo "     It is opt-in: the default --kv-cache-dtype (auto/bf16) never touches it."
+echo "     It fixes the TurboQuant + MTP (n=3) repetition-collapse / IMA bug (issue #52475)."
+echo "     The default --kv-cache-dtype (auto/bf16) does not touch it."
 echo "Remember the canary: 5 deterministic prompts, temp=0, sha256 vs eager before trusting graphs."
