@@ -1,0 +1,152 @@
+version: '3.8'
+
+services:
+  vllm-server:
+    image: vllm-intel-xpu:2026-10-04_11-18-0872ddf4b9-mtpeagle-visionoffload-noembed-mtp-getmem-grammar-mtphitfix-fstier
+      #2026-09-30_18-52-d2fb35f66e-mtpeagle-visionoffload-noembed-mtp-getmem-grammar-mtphitfix-fstier
+      #2026-09-27_17-57-44af287ebe-mtpeagle-visionoffload-noembed-mtp-getmem-grammar-mtphitfix-fstier
+      #2026-09-24_09-50-00b7847c80-mtpeagle-visionoffload-noembed-mtp-getmem-grammar-tritonar-graphmemprof-mtphitfix
+      #2026-09-21_15-19-e34685dfc0-mtpeagle-visionoffload-noembed-mtp-getmem-grammar-tritonar-graphmemprof-mtphitfix
+    pull_policy: never
+    ports:
+      - "8002:8000"
+    #shm_size: '16gb'
+    ipc: host
+    privileged: true
+    environment:
+      - VLLM_WORKER_MULTIPROC_METHOD=spawn
+      #- VLLM_ENGINE_ITERATION_TIMEOUT_S=600
+      #- CCL_TOPO_FABRIC_VERTEX_CONNECTION_CHECK=0
+      - HF_TOKEN=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
+      #- VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+      - HF_HUB_DISABLE_SYMLINKS=1
+      - PYTHONHASHSEED=1234
+      #- CCL_ZE_CLOSE_IPC_WA=1
+      #- CCL_SYCL_ALLGATHERV_SIMPLE_THRESHOLD=1073741824
+      #- CCL_SYCL_ALLREDUCE_SIMPLE_THRESHOLD=1073741824
+      #- CCL_SYCL_ALLREDUCE_TMP_BUF=1
+      #- CCL_SYCL_ALLGATHERV_TMP_BUF=1
+      #- CCL_LOG_LEVEL=DEBUG
+      #- CCL_ZE_CACHE=0
+      - CCL_SYCL_ALLGATHERV_SIMPLE_THRESHOLD=1073741824
+      - CCL_SYCL_ALLREDUCE_SIMPLE_THRESHOLD=1073741824
+      - VLLM_VISION_CPU_OFFLOAD_GB=4
+      #- VLLM_USE_V2_MODEL_RUNNER=0
+      #- VLLM_XPU_ENABLE_XPU_GRAPH=1
+      #- VLLM_XPU_TRITON_ALLREDUCE=1
+      #- VLLM_KV_CACHE_LAYOUT=LBNHC
+      #- VLLM_USE_SIMPLE_KV_OFFLOAD=1
+      #- SYCL_PI_LEVEL_ZERO_USE_IMMEDIATE_COMMANDLISTS=1
+      #- UR_L0_USE_IMMEDIATE_COMMANDLISTS=1
+      #- VLLM_MLA_DISABLE=1
+      #- SYCL_UR_TRACE=-1
+      #- UR_LOG_LEVEL=info
+      #- CCL_ALLREDUCE=ring
+      #- UR_L0_V2_FORCE_DISABLE_COPY_OFFLOAD=1
+      #- TRITON_PRINT_AUTOTUNING=1
+      # === oneCCL mitigations below ===
+      #- CCL_ENABLE_SYCL_KERNELS=0 ## to musi byc
+      #- TORCH_LLM_ALLREDUCE=1
+      #- CCL_ALLREDUCE=ring
+      #- CCL_TOPO_FABRIC_VERTEX_CONNECTION_CHECK=0
+      #- CCL_ZE_CACHE_OPEN_IPC_HANDLES=0
+      #- SYCL_UR_USE_LEVEL_ZERO_V2=0
+      #- CCL_ATL_TRANSPORT=ofi
+      #- CCL_ZE_IPC_EXCHANGE=sockets
+      #- CCL_TOPO_P2P_ACCESS=0 
+    devices:
+      - /dev/dri/card0:/dev/dri/card0
+      - /dev/dri/renderD128:/dev/dri/renderD128
+      - /dev/dri/card1:/dev/dri/card1
+      - /dev/dri/renderD129:/dev/dri/renderD129
+    volumes:
+      #- triton_cache5:/root/.triton/cache
+      #- igc_cache5:/root/.cache/neo_compiler_cache
+      #- vllm_compile_cache5:/root/.cache/vllm
+      - vllm_hf_cache:/root/.cache/huggingface
+      - /dev/dri/by-path:/dev/dri/by-path
+      - vllm_prefix_cache:/vllm_prefix_cache
+    entrypoint: []
+    restart: unless-stopped
+    #dbirks/Qwen3.8-27B-W4A16-AutoRound - wzor
+    #XReyRobert/Qwen3.8-27B-W4A16-AutoRound-INT8-Head-Embeddings - ta sama jakość, +2,5 GB na KV
+    #ababaka/Huihui-Qwen3.8-27B-Abliterated-W4A16-AutoRound - uncensored +2,5 GB KV
+    #born2bewild/Qwen3.8-27B-W4A16-AutoRound-fast - 15g uncenzored - dziala z patchem
+    #twolven/Qwen3.8-27B-abliterated-AWQ-MTP - dziala
+    #kernelogic/Qwen3.8-27B-Uncensored-GPTQ-Int4-sym-G128-MTP-BF16 - dla xpu, w opisie prefix caching nie dziala
+    #+ bowmanslayer/Qwen3.8-27B-Uncensored-W4A16-vision-mtp - podobno najlepszy unconzored
+    #Zynerji/Qwen3.8-27B-PristinelyUncensored-HOMEUSER-16-24 - wszystko w 4bit - wymaga vllm modyfikowanego
+    #protogeni/Qwen3.8-27B-Uncensored-W4A16-RTX3090-MTP4
+    #Marcin116/Qwen3.8-27B-W4A16-AutoRound-fast-embed-int4
+    #Marcin116/Qwen3.8-27B-Uncensored-W4A16-RTX3090-MTP4-embed-int4
+    #Marcin116/Qwen3.8-27B-Uncensored-W4A16-AutoRound-embed-int4
+    #jasonboukheir/Qwen3.8-27B-AEON-Ultimate-Uncensored-BF16-W4A16-AutoRound
+    #Vishva007/Qwen3.8-27B-W4A16-AutoRound
+
+    #turboquant_k8v4 turboquant_4bit_nc
+    command: >
+      vllm serve Marcin116/Qwen3.8-27B-W4A16-AutoRound-fast-embed-int4
+      --served-model-name Qwen3.8-27B
+      --dtype auto
+      --port 8000
+      --gpu-memory-utilization 0.95
+      --tensor-parallel-size 2
+      --trust-remote-code
+      --max-model-len 262144
+      --kv-cache-dtype fp8
+      --max-num-seqs 6
+      --enable-auto-tool-choice
+      --reasoning-parser qwen3
+      --tool-call-parser qwen3_xml
+      --enable-prompt-tokens-details
+      --enable-chunked-prefill
+      --max-num-batched-tokens 8192
+      --enable-prefix-caching
+      --watermark 0.05
+      --scheduling-policy priority
+      --prefix-caching-hash-algo xxhash
+      --kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"spec_name":"TieringOffloadingSpec","cpu_bytes_to_use":8589934592,"secondary_tiers":[{"type":"fs","root_dir":"/vllm_prefix_cache","n_read_threads":4,"n_write_threads":4,"max_bytes":103079215104}]}}'
+      --speculative-config '{"method":"mtp","num_speculative_tokens":3,"disable_eagle_block_drop":true}'
+    #--enforce-eager
+    # 8589934592 12884901888 17179869184
+    #--kv-offloading-backend native
+    #--kv-offloading-size 16
+
+
+    #--enforce-eager
+
+    #--speculative-config '{"method":"ngram","num_speculative_tokens":3,"prompt_lookup_min":2,"prompt_lookup_max":5}'
+    #--speculative-config '{"method":"ngram_gpu","num_speculative_tokens":5,"prompt_lookup_min":2,"prompt_lookup_max":5}'
+
+    #--kv-offloading-backend native
+    #--kv-offloading-size 16
+    #--offload-backend prefetch
+    #--offload-group-size 8
+    #--offload-num-in-group 1
+    #--offload-prefetch-step 2
+    #--language-model-only
+    #--mamba-ssm-cache-dtype float16
+    #--speculative-config '{"method":"mtp","num_speculative_tokens":1}'
+    #--speculative-config '{"method":"ngram","num_speculative_tokens":1}'
+    #--prefix-cache-retention-interval 1600 # workaround do mtp
+    #--speculative-config '{"method":"ngram","num_speculative_tokens":1,"prompt_lookup_min":2,"prompt_lookup_max":4}'
+    #--speculative-config '{"method":"ngram","num_speculative_tokens":4,"prompt_lookup_min":2,"prompt_lookup_max":4}'
+    #--speculative-config '{"method":"mtp","num_speculative_tokens":2}'
+    #--default-chat-template-kwargs '{"enable_thinking": true, "thinking_token_budget": 8192}'
+    #--default-chat-template-kwargs '{"enable_thinking": false}'
+    #--disable-hybrid-kv-cache-manager
+    #--mamba-cache-mode align
+    #--mamba-ssm-cache-dtype float16
+    #--mamba-cache-dtype float16
+    #--dtype float16
+    # 8192 16384 32768 65536 98304 131072 147456 163840 196608 229376 253952 258048 262144
+    #--async-scheduling
+    #--block-size 64
+volumes:
+  vllm_prefix_cache:
+    external: true
+  #triton_cache5:
+  #igc_cache5:
+  #vllm_compile_cache5:
+  vllm_hf_cache:
+    external: true
