@@ -31,7 +31,22 @@
 #                     123x [Errno 122] "Disk quota exceeded" + 129 short
 #                     writes, all in _r0). Inert unless the serve
 #                     --kv-transfer-config fs tier sets "max_bytes".
-#                     Applied last.
+#                     Applied before [9d].
+#     [9d] hybridprefill : hybrid-model prefill misclassified as uniform
+#                     decode (port of open upstream #47123, head 41edfaf).
+#                     Qwen3.5/3.8 are HYBRID (linear_attention mamba layers
+#                     interleaved with full_attention): in _is_uniform_decode a
+#                     request whose prompt length is exactly 1+num_spec_tokens
+#                     (e.g. MTP n=3 -> a 4-token prompt) is misread as a
+#                     uniform-decode / spec step, the mamba (GDN) state is not
+#                     zeroed, and the forward returns garbage. This adds
+#                     _compute_force_uniform_decode: hybrid + any prefill in
+#                     the batch -> force False (correct), non-hybrid or
+#                     pure-decode -> None (old heuristic). Same corruption
+#                     symptom class as [9b]/#53912 but a DIFFERENT root cause
+#                     (prefill misclassification vs prefix-cache-hit reuse),
+#                     so it complements rather than replaces [9b]. No-op for
+#                     non-hybrid models. Applied last.
 #   [8] tritonar  : DISABLED 2026-09-24 — TP=2 one-shot Triton symmetric-
 #                   memory allreduce (opt-in VLLM_XPU_TRITON_ALLREDUCE,
 #                   upstream analog #54768 still open). Never functional on
@@ -93,7 +108,16 @@
 #            full PR rewrites stale base (sink_blocks / manager registry) so only
 #            the minimal find_longest_cache_hit hunk is adopted locally.
 #   #53912  "[Bug]: MTP + prefix caching corruption (empty/repeated output)" —
-#            the symptom [9b] addresses on this exact config.
+#            the symptom [9b] (prefix-cache-hit reuse) AND [9d] (prefill
+#            misclassified as uniform decode) both address on this config;
+#            the two root causes are independent, so both patches stay.
+#   #47123  "[Bugfix] Fix misclassification of prefill as uniform decode for
+#            hybrid models" — still OPEN/unmerged (head 41edfaf). Vendored
+#            locally as [9d] hybridprefill: Qwen3.5/3.8 are hybrid, so a
+#            prompt of exactly 1+num_spec_tokens was read as a uniform-decode
+#            spec step (mamba state never zeroed -> garbage). No-op for
+#            non-hybrid models; complements [9b]. Once MERGED upstream, drop
+#            step 9d — main will carry it natively.
 #   #54327  "[Feature][KV Offload] Add bounded capacity and LRU eviction to the
 #            filesystem tier" — still OPEN/unmerged (re-checked 2026-09-26
 #            three times, no PR activity since 2026-09-20, base 10e6a7f2 is
@@ -116,9 +140,11 @@
 # validated 7-patch flow (mtpeagle,vision,embed,mtpvocab,getmem,grammar,
 # mtphitfix) — [8] tritonar is DISABLED (2026-09-24) and [9] memprof was
 # superseded by upstream #51600 (2026-09-24). [9b] mtphitfix touches
-# single_type_kv_cache_manager.py and [9c] fstier only
-# vllm/v1/kv_offload/tiering/fs/manager.py (+ its test + docs), which no
-# earlier patch modifies, so [9b] then [9c] go last, in that order.
+# single_type_kv_cache_manager.py, [9c] fstier only
+# vllm/v1/kv_offload/tiering/fs/manager.py (+ its test + docs), and [9d]
+# hybridprefill only vllm/v1/worker/gpu_model_runner.py (+ its test) — none of
+# the earlier patches modify those files, so [9b] then [9c] then [9d] go last,
+# in that order.
 # Every applied patch FAILS THE BUILD loudly if it no longer applies
 # (upstream drift); none silently skip.
 #
@@ -295,6 +321,27 @@
 #   -> drop [7b]; #54327 merge -> drop [9c]; #56026 merge -> drop [2] and
 #   relax the era-gate (kv_cache_groups_tp_replicas stays a hard marker only
 #   while the re-anchored test pre-image depends on the #57652 EOF).
+#   RE-VERIFIED 2026-10-05 (added [9d] hybridprefill): the existing 8-patch
+#   chain strict `git apply` clean on current vllm main @ 710ac56e (2026-10-05);
+#   era-gate PASS (_uses_trailing_mtp_layers + kv_cache_groups_tp_replicas both
+#   present). Added step [9d] = port of open upstream PR #47123 (head 41edfaf),
+#   vendored verbatim as patches/hybrid-prefill-uniform-decode-47123.patch (2
+#   files: vllm/v1/worker/gpu_model_runner.py + its test). It fixes a prefill
+#   being misclassified as a uniform-decode / spec step in HYBRID models
+#   (Qwen3.5/3.8 have linear_attention mamba layers interleaved with
+#   full_attention): a prompt of exactly 1+num_spec_tokens (MTP n=3 -> 4 tokens)
+#   triggered _is_uniform_decode, the mamba/GDN state was never zeroed, and the
+#   forward returned garbage. The port adds _compute_force_uniform_decode:
+#   hybrid + any prefill in the batch -> force False; non-hybrid or pure-decode
+#   -> None (old heuristic preserved) — a NO-OP for non-hybrid models. It is an
+#   INDEPENDENT root cause from [9b] mtphitfix (#57128, prefix-cache-hit reuse);
+#   both fix the #53912/#56917 "empty/repeated output" symptom class, so both
+#   stay. It only touches gpu_model_runner.py + its test (no earlier patch
+#   does), so it applies on top of [1]-[9c] with no collision; verified `git
+#   apply --check` clean on 710ac56e and it re-applies after all 8 preceding
+#   patches in the chain. PR #47123 re-checked OPEN/unmerged (head 41edfaf,
+#   created 2026-06-30) — so [9d] is required now; DROP step 9d once #47123
+#   merges upstream.
 
 # 1. Hard reset to a clean state and pull the latest upstream code
 docker builder prune -a -f
@@ -489,6 +536,50 @@ git apply "$FSTIER_PATCH" || { echo "FATAL: fs-tier-max-bytes-54327 patch no lon
   echo "       re-hunk the patch onto current main (update the 'index' hashes) and" \
   echo "       re-run."; exit 1; }
 NAME=${NAME}-fstier
+
+# 9d. Hybrid-model prefill misclassified as uniform decode (port of upstream
+#     PR #47123, head 41edfaf, still OPEN/unmerged). Vendored verbatim from the
+#     PR (2 files, git-format): vllm/v1/worker/gpu_model_runner.py + its test.
+#     Qwen3.5/3.8 are HYBRID (mamba/linear_attention layers interleaved with
+#     full_attention), so the _is_uniform_decode heuristic could misread a
+#     request whose prompt length is exactly 1+num_spec_tokens (MTP n=3 -> a
+#     4-token prompt) as a uniform-decode / spec step: the mamba (GDN) state
+#     was never zeroed and the forward produced garbage. The PR adds
+#     _compute_force_uniform_decode, consulted in _determine_batch_execution_
+#     and_padding: hybrid + any prefill in the batch -> force False (correct);
+#     non-hybrid or a pure-decode batch -> None (the old heuristic is
+#     preserved). So it is a NO-OP for non-hybrid models and never makes a
+#     decode-only batch slower. It is an INDEPENDENT root cause from [9b]
+#     mtphitfix (#57128: prefix-cache "hit" reusing unverified draft Mamba
+#     state) — both hit the #53912 "empty/repeated output" symptom class on
+#     this exact config, so both stay. Self-contained: it only touches
+#     gpu_model_runner.py + its test, which no earlier patch in the chain
+#     modifies, so it applies cleanly on top of [1]-[9c]. Drop it once
+#     #47123 is MERGED upstream (main will then carry the fix natively).
+#     Fetched the same way as [9c] (local VAULT_LOCAL first, raw URL fallback,
+#     clear FATAL if the vault's main carrying [9d] is not pushed yet).
+HYBRID_PATCH=""
+if [ -n "${VAULT_LOCAL:-}" ] && [ -f "${VAULT_LOCAL}/patches/hybrid-prefill-uniform-decode-47123.patch" ]; then
+  HYBRID_PATCH="${VAULT_LOCAL}/patches/hybrid-prefill-uniform-decode-47123.patch"
+else
+  curl -fL "https://raw.githubusercontent.com/${V}/main/patches/hybrid-prefill-uniform-decode-47123.patch" -o /tmp/hybrid-prefill.patch 2>/dev/null
+  [ -s /tmp/hybrid-prefill.patch ] && HYBRID_PATCH=/tmp/hybrid-prefill.patch
+fi
+if [ -z "$HYBRID_PATCH" ]; then
+  echo "FATAL: cannot fetch patches/hybrid-prefill-uniform-decode-47123.patch (raw URL 404 —"
+  echo "       the vault's main carrying [9d] is not pushed yet). Fix: 'git push"
+  echo "       origin main' in marcinkuk/vllm-2xb50, or set"
+  echo "       VAULT_LOCAL=/path/to/local/vllm-2xb50-checkout and re-run."; exit 1;
+fi
+git apply "$HYBRID_PATCH" || { echo "FATAL: hybrid-prefill-uniform-decode-47123 patch no longer applies on ${HASH}."; \
+  echo "       The patch ports open upstream #47123 (head 41edfaf): it adds" \
+  echo "       _compute_force_uniform_decode to vllm/v1/worker/gpu_model_runner.py" \
+  echo "       (the prefill-as-uniform-decode misclassification in hybrid models)" \
+  echo "       plus test_compute_force_uniform_decode in" \
+  echo "       tests/v1/worker/test_gpu_model_runner.py. Upstream drift:" \
+  echo "       re-hunk the patch onto current main (update the 'index' hashes and" \
+  echo "       hunk line numbers) and re-run."; exit 1; }
+NAME=${NAME}-hybridprefill
 
 # 11. Build the XPU image (graphs-capable).
 docker build --cpuset-cpus="0" --memory="16g" --no-cache -f docker/Dockerfile.xpu -t vllm-intel-xpu:${NAME} .
