@@ -46,7 +46,23 @@
 #                     symptom class as [9b]/#53912 but a DIFFERENT root cause
 #                     (prefill misclassification vs prefix-cache-hit reuse),
 #                     so it complements rather than replaces [9b]. No-op for
-#                     non-hybrid models. Applied last.
+#                     non-hybrid models. Applied before [9e].
+#     [9e] turboquantspec : TurboQuant spec-decode CUDA-graph fix (port of
+#                     open upstream #53406, head 673af7f5; fixes issue #52475:
+#                     MTP + turboquant_* KV = repetition collapse / IMA). The
+#                     TQ backend declared _cudagraph_support = UNIFORM_BATCH,
+#                     so MTP verify batches (uniform query_len = 1 + n_spec =
+#                     4 for n=3) got FULL-captured with dummy metadata
+#                     (seq_lens = 1): the TQ verify path is NOT graph-
+#                     capturable (CPU-resident metadata, per-request Python
+#                     prefill loop, supports_spec_as_decode=False), so
+#                     garbage attention was baked into the graph. This
+#                     downgrades the level to UNIFORM_SINGLE_TOKEN_DECODE so
+#                     verify batches run uncaptured, correctly. INERT unless
+#                     the serve command passes a turboquant_* --kv-cache-
+#                     dtype (default bf16 KV never instantiates the TQ
+#                     backend). Self-contained (one file, no overlap with
+#                     [1]-[9d]). Applied last; drop when #53406 merges.
 #   [8] tritonar  : DISABLED 2026-09-24 — TP=2 one-shot Triton symmetric-
 #                   memory allreduce (opt-in VLLM_XPU_TRITON_ALLREDUCE,
 #                   upstream analog #54768 still open). Never functional on
@@ -61,6 +77,9 @@
 #   pass --enforce-eager to run the eager baseline / canary. [9c] fstier
 #   needs no env either, but it is INERT unless the serve --kv-transfer-
 #   config fs tier sets "max_bytes" (see step 9c and the patch README).
+#   [9e] turboquantspec is INERT unless the serve command passes a
+#   turboquant_* --kv-cache-dtype (see the final echo); it is a PREREQUISITE
+#   for TurboQuant + MTP on this stack (issue #52475).
 #
 # NOTE on patch [8] tritonar (DISABLED in the build since 2026-09-24, see step
 #   8): when/if re-enabled, it ADDS new files (xpu_triton_all_reduce.py etc).
@@ -581,6 +600,50 @@ git apply "$HYBRID_PATCH" || { echo "FATAL: hybrid-prefill-uniform-decode-47123 
   echo "       hunk line numbers) and re-run."; exit 1; }
 NAME=${NAME}-hybridprefill
 
+# 9e. TurboQuant spec-decode CUDA-graph fix (port of upstream PR #53406, head
+#     673af7f5, still OPEN/unmerged; fixes issue #52475). Vendored verbatim
+#     from the PR (1 file, git-format): vllm/v1/attention/backends/
+#     turboquant_attn.py. The TQ backend declared _cudagraph_support =
+#     UNIFORM_BATCH, so MTP verify batches (uniform query_len = 1 +
+#     num_speculative_tokens; = 4 for our n=3) were FULL-captured with dummy
+#     metadata (seq_lens filled with 1). The TQ verify path is not graph-
+#     capturable (CPU-resident metadata, per-request Python prefill loop,
+#     supports_spec_as_decode=False), so empty/garbage attention got baked
+#     into the graph: silent repetition collapse for num_speculative_tokens
+#     > 1, illegal memory access for == 1 (reported on Qwen3.8-27B GDN
+#     hybrid + MTP — this exact model family). This downgrades the level to
+#     UNIFORM_SINGLE_TOKEN_DECODE: verify batches run uncaptured (correct),
+#     pure 1-token decodes still capture (no decode-throughput change).
+#     INERT unless the serve command passes a turboquant_* --kv-cache-dtype
+#     (default bf16 KV never instantiates the TQ backend) — see the final
+#     echo. Self-contained: it only touches turboquant_attn.py, which no
+#     earlier patch in the chain modifies, so it applies cleanly on top of
+#     [1]-[9d]. Fetched the same way as [9c]/[9d] (local VAULT_LOCAL first,
+#     raw URL fallback, clear FATAL if the vault's main carrying [9e] is not
+#     pushed yet). Drop it once #53406 is MERGED upstream (main will then
+#     carry the fix natively); re-check the head weekly.
+TQSPECPATCH=""
+if [ -n "${VAULT_LOCAL:-}" ] && [ -f "${VAULT_LOCAL}/patches/turboquant-specdecode-cg-53406.patch" ]; then
+  TQSPECPATCH="${VAULT_LOCAL}/patches/turboquant-specdecode-cg-53406.patch"
+else
+  curl -fL "https://raw.githubusercontent.com/${V}/main/patches/turboquant-specdecode-cg-53406.patch" -o /tmp/turboquant-specdecode-cg.patch 2>/dev/null
+  [ -s /tmp/turboquant-specdecode-cg.patch ] && TQSPECPATCH=/tmp/turboquant-specdecode-cg.patch
+fi
+if [ -z "$TQSPECPATCH" ]; then
+  echo "FATAL: cannot fetch patches/turboquant-specdecode-cg-53406.patch (raw URL 404 —" \
+  echo "       the vault's main carrying [9e] is not pushed yet). Fix: 'git push" \
+  echo "       origin main' in marcinkuk/vllm-2xb50, or set" \
+  echo "       VAULT_LOCAL=/path/to/local/vllm-2xb50-checkout and re-run."; exit 1;
+fi
+git apply "$TQSPECPATCH" || { echo "FATAL: turboquant-specdecode-cg-53406 patch no longer applies on ${HASH}."; \
+  echo "       The patch ports open upstream #53406 (head 673af7f5): _cudagraph_" \
+  echo "       "support" UNIFORM_BATCH -> UNIFORM_SINGLE_TOKEN_DECODE in" \
+  echo "       vllm/v1/attention/backends/turboquant_attn.py (spec-decode verify" \
+  echo "       batches were FULL-captured with dummy metadata; see issue #52475)." \
+  echo "       Upstream drift: re-hunk the patch onto current main (update the" \
+  echo "       'index' hashes and hunk line numbers) and re-run."; exit 1; }
+NAME=${NAME}-turboquantspec
+
 # 11. Build the XPU image (graphs-capable).
 docker build --cpuset-cpus="0" --memory="16g" --no-cache -f docker/Dockerfile.xpu -t vllm-intel-xpu:${NAME} .
 
@@ -598,4 +661,12 @@ echo "         \"max_bytes\":<per-rank-dir byte cap>]}}'"
 echo "     The bound is per <model>_<digest>_r<rank> dir and requires exclusive"
 echo "     ownership of it (no multi-engine sharing in bounded mode). Size it to"
 echo "     the volume's per-dir quota so LRU eviction happens BEFORE [Errno 122] quota."
+echo "[9e] turboquantspec (PR #53406) is the MTP-safety fix for the TurboQuant"
+echo "     attention backend and is INERT unless you actually serve with a"
+echo "     turboquant_* KV cache dtype, e.g.:"
+echo "       --kv-cache-dtype turboquant_4bit_nc   (4-bit keys w/ norm-corr | 4-bit values,"
+echo "         the balanced default; 'nc' = norm correction)"
+echo "       or turboquant_k8v4 (8-bit keys) / turboquant_k3v4_nc (3-bit keys) / turboquant_3bit_nc."
+echo "     WITHOUT this patch, TurboQuant + MTP (n=3) repetition-collapses or IMA (issue #52475)."
+echo "     It is opt-in: the default --kv-cache-dtype (auto/bf16) never touches it."
 echo "Remember the canary: 5 deterministic prompts, temp=0, sha256 vs eager before trusting graphs."
