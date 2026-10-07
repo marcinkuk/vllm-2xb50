@@ -71,6 +71,9 @@
 #                     UR_RESULT_ERROR_DEVICE_LOST — vllm #58388 and, since
 #                     #56531 (10-06), the startup death #60379 (TP=2 + MTP +
 #                     GDN, the exact 10-06 build). No-op on TP=1.
+#   Tag-suffix aliases (Docker tags cap at 128 chars, see the step-11 guard):
+#   [3] -> -vision, [9d] -> -hybrid, [9e] -> -tq. The full names stay in each
+#   step's comment/echo; the tag only needs to be readable/unique.
 #   [8] tritonar  : DISABLED 2026-09-24 — TP=2 one-shot Triton symmetric-
 #                   memory allreduce (opt-in VLLM_XPU_TRITON_ALLREDUCE,
 #                   upstream analog #54768 still open). Never functional on
@@ -494,7 +497,7 @@ NAME=${NAME}-mtpeagle
 # 3. Vision-tower CPU offload (VLLM_VISION_CPU_OFFLOAD_GB). Not upstream.
 curl -L "https://raw.githubusercontent.com/${V}/main/patches/vision-tower-cpu-offload.patch" -o /tmp/visionoffload.patch
 git apply /tmp/visionoffload.patch || { echo "FATAL: vision-offload patch no longer applies on ${HASH}"; exit 1; }
-NAME=${NAME}-visionoffload
+NAME=${NAME}-vision
 
 # 4. Embed-quantization (W4A16 AutoRound: quantized embed_tokens on XPU). Not upstream.
 #    git-format; MUST be applied before mtp-vocab (step 5).
@@ -647,7 +650,7 @@ git apply "$HYBRID_PATCH" || { echo "FATAL: hybrid-prefill-uniform-decode-47123 
   echo "       tests/v1/worker/test_gpu_model_runner.py. Upstream drift:" \
   echo "       re-hunk the patch onto current main (update the 'index' hashes and" \
   echo "       hunk line numbers) and re-run."; exit 1; }
-NAME=${NAME}-hybridprefill
+NAME=${NAME}-hybrid
 
 # 9e. TurboQuant spec-decode CUDA-graph fix (port of upstream PR #53406, head
 #     673af7f5, still OPEN/unmerged; fixes issue #52475). Vendored verbatim
@@ -691,7 +694,7 @@ git apply "$TQSPECPATCH" || { echo "FATAL: turboquant-specdecode-cg-53406 patch 
   echo "       batches were FULL-captured with dummy metadata; see issue #52475)." \
   echo "       Upstream drift: re-hunk the patch onto current main (update the" \
   echo "       'index' hashes and hunk line numbers) and re-run."; exit 1; }
-NAME=${NAME}-turboquantspec
+NAME=${NAME}-tq
 
 # 10. oneCCL collective-chain reset after each graph-capture warmup (port of
 #     upstream #58415 — CLOSED UNMERGED — with the dead-code-after-yield
@@ -735,6 +738,18 @@ git apply "$ONERCCLRESETPATCH" || { echo "FATAL: xpu-onerccl-capture-reset patch
 NAME=${NAME}-onercclreset
 
 # 11. Build the XPU image (graphs-capable).
+#     Tag-length guard: Docker image tags cap at 128 chars, and the NAME
+#     accumulates one short suffix per applied patch, so adding a patch can
+#     silently push the tag over the cap and fail only at this docker build
+#     step (10-07: 136 chars -> "invalid reference format"). Keep new patch
+#     suffixes SHORT (see the -hybrid / -tq aliases above) and check here.
+if [ ${#NAME} -gt 120 ]; then
+  echo "FATAL: image tag vllm-intel-xpu:${NAME} is ${#NAME} chars (Docker cap 128)."
+  echo "       Shorten a patch's NAME suffix in its step above (the full name"
+  echo "       stays in that step's comments/echo; the tag only needs to be"
+  echo "       unique enough to read)."
+  exit 1
+fi
 docker build --cpuset-cpus="0" --memory="16g" --no-cache -f docker/Dockerfile.xpu -t vllm-intel-xpu:${NAME} .
 
 echo vllm-intel-xpu:${NAME}
