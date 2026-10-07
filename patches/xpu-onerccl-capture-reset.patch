@@ -1,0 +1,95 @@
+From: OpenHands <openhands@all-hands.dev>
+Date: Wed, 07 Oct 2026 11:31:04 +0000
+Subject: [PATCH] XPU: reset the oneCCL collective chain after each graph-capture warmup (port of #58415, fixed placement)
+
+
+Port of the unmerged upstream PR #58415 (vllm-project/vllm), corrected for the
+dead-code-after-yield bug in that PR (GroupCoordinator.graph_capture is a
+generator; code placed after its yield never runs). This variant:
+  1. Adds XpuCommunicator.reset_after_graph_capture(): one tiny eager
+     all-reduce that replaces the oneCCL chain head event (which a capture
+     leaves bound to a command-graph completion event) with an ordinary
+     event. No-op when world_size <= 1 or the stream is already capturing.
+  2. Calls it from the model-runner capture loop right AFTER the eager
+     warmup run and BEFORE the torch.cuda.graph __enter__ (whose
+     torch.xpu.synchronize() aborts with UR_RESULT_ERROR_DEVICE_LOST while
+     the chain head event is a command-graph one).
+
+Fixes: vllm-project/vllm#58388 (post-capture prefill death) and #60379
+(startup death on the first PIECEWISE capture with TP=2 + MTP on a
+GDN/Mamba-hybrid model; regression introduced by #56531, which routes
+zero-draft rows through the speculative path and thereby into oneCCL
+collectives inside the capture window).
+
+Re-hunked onto main @ df417f780a (2026-10-07). Becomes a no-op once upstream
+lands #58415 or an equivalent: the call site is a getattr() probe, so if the
+method is already provided upstream nothing changes.
+
+
+diff --git a/vllm/distributed/device_communicators/xpu_communicator.py b/vllm/distributed/device_communicators/xpu_communicator.py
+index 7a5913754f..5fcf48b09f 100644
+--- a/vllm/distributed/device_communicators/xpu_communicator.py
++++ b/vllm/distributed/device_communicators/xpu_communicator.py
+@@ -69,6 +69,29 @@ class XpuCommunicator(DeviceCommunicatorBase):
+         dist.all_reduce(output, group=self.device_group)
+         return output
+ 
++    def reset_after_graph_capture(self) -> None:
++        """Issue one tiny eager collective after an XPU graph capture.
++
++        oneCCL chains each collective on the previous one's completion event.
++        After a capture, that event belongs to the captured command graph, and
++        the next (large-message) all-reduce submits with an explicit dependency
++        on it, which makes the submitting queue join the graph's recording.
++        Every later replay/wait then fails with ``xpuStreamCaptureStatus:
++        Recording`` / ``wait cannot be called for a queue which is recording``,
++        and a ``torch.xpu.synchronize()`` at the top of the *next* capture
++        aborts with ``UR_RESULT_ERROR_DEVICE_LOST``. One small eager
++        all-reduce replaces that event with an ordinary one; a later replay
++        never touches oneCCL's host-side state, so doing this once per capture
++        is enough. See upstream #58388 / #58415 and marcinkuk/vllm-2xb50.
++        """
++        if self.world_size <= 1:
++            return
++        _isc = getattr(torch.xpu, "is_current_stream_capturing", None)
++        if _isc is not None and _isc():
++            return
++        flush = torch.zeros(1, dtype=torch.float32, device=self.device)
++        dist.all_reduce(flush, group=self.device_group)
++
+     def reduce_scatter(self, input_: torch.Tensor, dim: int = -1):
+         world_size = self.world_size
+ 
+diff --git a/vllm/v1/worker/gpu/cudagraph_utils.py b/vllm/v1/worker/gpu/cudagraph_utils.py
+index 73be62319a..19b7702979 100644
+--- a/vllm/v1/worker/gpu/cudagraph_utils.py
++++ b/vllm/v1/worker/gpu/cudagraph_utils.py
+@@ -28,6 +28,7 @@ from vllm.config import VllmConfig, set_current_vllm_config
+ from vllm.config.compilation import CUDAGraphMode
+ from vllm.distributed.parallel_state import (
+     get_pp_group,
++    get_tp_group,
+     graph_capture,
+     is_global_first_rank,
+ )
+@@ -461,6 +462,20 @@ class CudaGraphManager:
+                     # Warmup
+                     forward_fn(CUDAGraphMode.NONE)
+ 
++                    # The warmup above ran an eager forward that issues oneCCL
++                    # collectives, leaving the XPU queue's completion event
++                    # bound to oneCCL's chain (the event of the last collective,
++                    # which may still be attached to a graph). The capture's
++                    # torch.cuda.graph __enter__ calls torch.xpu.synchronize(),
++                    # which faults with UR_RESULT_ERROR_DEVICE_LOST while that
++                    # event is a command-graph one. One tiny eager all-reduce
++                    # replaces it with an ordinary event. XPU-only, no-op when
++                    # not multi-GPU or mid-capture.
++                    _dc = getattr(get_tp_group(), "device_communicator", None)
++                    _reset = getattr(_dc, "reset_after_graph_capture", None)
++                    if _reset is not None:
++                        _reset()
++
+                     # Capture
+                     logger.debug(
+                         "CG Capture: mode=%s, batch_desc=%s",

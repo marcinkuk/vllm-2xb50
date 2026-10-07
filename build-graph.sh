@@ -59,8 +59,18 @@
 #                     garbage attention was baked into the graph. This
 #                     downgrades the level to UNIFORM_SINGLE_TOKEN_DECODE so
 #                     verify batches run uncaptured, correctly. Self-contained
-#                     (one file, no overlap with [1]-[9d]). Applied last; drop
-#                     when #53406 merges.
+#                     (one file, no overlap with [1]-[9d]). Applied before
+#                     [10]; drop when #53406 merges.
+#     [10] onercclreset : reset oneCCL's collective chain after every
+#                     graph-capture warmup (port of the CLOSED-UNMERGED
+#                     upstream #58415, with the hook moved out of the dead
+#                     after-yield location into the model-runner capture
+#                     loop). Without it, a captured graph leaves the oneCCL
+#                     chain bound to the graph's completion event and the
+#                     NEXT capture's torch.xpu.synchronize() aborts with
+#                     UR_RESULT_ERROR_DEVICE_LOST — vllm #58388 and, since
+#                     #56531 (10-06), the startup death #60379 (TP=2 + MTP +
+#                     GDN, the exact 10-06 build). No-op on TP=1.
 #   [8] tritonar  : DISABLED 2026-09-24 — TP=2 one-shot Triton symmetric-
 #                   memory allreduce (opt-in VLLM_XPU_TRITON_ALLREDUCE,
 #                   upstream analog #54768 still open). Never functional on
@@ -143,6 +153,26 @@
 #            exhaustion of the /vllm_prefix_cache volume, 09-25 log: 123x
 #            [Errno 122] + 129 short writes, all in the _r0 dir). Once
 #            MERGED upstream, drop step 9c — main will carry it natively.
+#   #58388  "[Bug][XPU][MRV2] engine dies when the first request after startup
+#            is a large prefill" — oneCCL leaves the stream Recording after a
+#            graph capture; the fix PR #58415 (reset oneCCL's collective chain
+#            after capture) was CLOSED UNMERGED. Patch [10] onercclreset is a
+#            local port of #58415 with its placement fixed (the upstream hook
+#            sat after the yield in GroupCoordinator.graph_capture, a
+#            generator — dead code). [10] instead resets in the model-runner
+#            capture loop after the eager warmup, before the capture
+#            __enter__. Needed by both #58388 (post-capture prefill) and
+#            #60379 (the 10-06 startup death on the FIRST PIECEWISE capture
+#            with TP=2 + MTP + GDN, introduced by #56531). No-op on TP=1;
+#            degrades to a no-op call if upstream lands #58415 — then drop
+#            step 10, like [9] was dropped for #51600.
+#   #56531  "[Bugfix] Route every speculation-capable row through the
+#            speculative path" — merged 2026-10-06 (0eac152707). The 48h
+#            regression that made the first capture record oneCCL collectives
+#            (use_spec_decode became `speculative_config is not None`); with
+#            the #58415-class oneCCL bug unfixed, it kills startup on XPU/TP2.
+#            NOT reverted here: it is a legitimate correctness fix, and [10]
+#            makes its capture-time collectives safe.
 #   imryanpurdy/Qwen3.8-27B-4x-Intel-B70s  — same model, MTP5 + graphs shipped,
 #            144 tok/s, bit-identical canary (docs/CAMPAIGN-2026-09-10-GRAPHS.md)
 #
@@ -159,9 +189,13 @@
 # superseded by upstream #51600 (2026-09-24). [9b] mtphitfix touches
 # single_type_kv_cache_manager.py, [9c] fstier only
 # vllm/v1/kv_offload/tiering/fs/manager.py (+ its test + docs), and [9d]
-# hybridprefill only vllm/v1/worker/gpu_model_runner.py (+ its test) — none of
-# the earlier patches modify those files, so [9b] then [9c] then [9d] go last,
-# in that order.
+# hybridprefill only vllm/v1/worker/gpu_model_runner.py (+ its test), [9e]
+# turboquantspec only vllm/v1/attention/backends/turboquant_attn.py, and [10]
+# onercclreset only vllm/distributed/device_communicators/xpu_communicator.py
+# + vllm/v1/worker/gpu/cudagraph_utils.py — none of the earlier ENABLED
+# patches modify any of those files ([8] tritonar also touches
+# xpu_communicator.py but is DISABLED), so [9b] then [9c] then [9d] then [9e]
+# then [10] go last, in that order.
 # Every applied patch FAILS THE BUILD loudly if it no longer applies
 # (upstream drift); none silently skip.
 #
@@ -359,6 +393,23 @@
 #   patches in the chain. PR #47123 re-checked OPEN/unmerged (head 41edfaf,
 #   created 2026-06-30) — so [9d] is required now; DROP step 9d once #47123
 #   merges upstream.
+#   RE-VERIFIED 2026-10-07 (added [10] onercclreset): local port of the
+#   CLOSED-UNMERGED upstream #58415 (reset oneCCL's collective chain after
+#   capture), with the hook moved out of the dead after-yield location
+#   (GroupCoordinator.graph_capture is a generator) into the model-runner
+#   capture loop, after the eager warmup and before the torch.cuda.graph
+#   __enter__. Added after the 10-06 startup-crash regression (vllm #60379:
+#   first PIECEWISE capture dies with UR_RESULT_ERROR_DEVICE_LOST under
+#   TP=2 + MTP + GDN; 48h bisect -> #56531, which makes zero-draft rows take
+#   the speculative path and thus record oneCCL collectives inside the
+#   capture window). [10] strict `git apply` clean on top of the full
+#   [2]-[9e] chain on both main @ df417f780a (2026-10-07) and 4ea0c28bc (the
+#   10-06 build base); both touched files (xpu_communicator.py,
+#   cudagraph_utils.py) had zero upstream commits since the patch was
+#   re-hunked, and both py_compile clean. The call site is a getattr()
+#   probe, so the patch degrades to a no-op call if upstream ever lands
+#   #58415 or an equivalent; when that happens drop step 10 (same lifecycle
+#   as [9] for #51600).
 
 # 1. Hard reset to a clean state and pull the latest upstream code
 docker builder prune -a -f
@@ -642,6 +693,47 @@ git apply "$TQSPECPATCH" || { echo "FATAL: turboquant-specdecode-cg-53406 patch 
   echo "       'index' hashes and hunk line numbers) and re-run."; exit 1; }
 NAME=${NAME}-turboquantspec
 
+# 10. oneCCL collective-chain reset after each graph-capture warmup (port of
+#     upstream #58415 — CLOSED UNMERGED — with the dead-code-after-yield
+#     placement fixed: the reset is called from the model-runner capture loop
+#     right AFTER the eager warmup and BEFORE the torch.cuda.graph __enter__,
+#     not after the GroupCoordinator.graph_capture yield). After an XPU graph
+#     capture, oneCCL's collective chain is bound to the captured graph's
+#     completion event; the next capture's torch.xpu.synchronize() then aborts
+#     with UR_RESULT_ERROR_DEVICE_LOST. One tiny eager all-reduce replaces that
+#     event with an ordinary one. Required on TP>=2 (this setup: 2x B50).
+#     This is what the 2026-10-06 startup crash (issue #60379, regression from
+#     #56531 + MTP/GDN) hits. No-op when world_size<=1 or already capturing;
+#     degrades to a no-op call if upstream lands #58415 (the call site probes
+#     the method with getattr), so it is safe to leave in across re-hunks.
+#     Re-hunked onto main @ df417f780a (2026-10-07); the two touched files
+#     (xpu_communicator.py, cudagraph_utils.py) had zero upstream drift in
+#     that era, so the patch stays green until one of them changes. Fetched
+#     the same way as [9c]/[9d]/[9e] (local VAULT_LOCAL first, raw URL
+#     fallback, clear FATAL if the vault's main carrying [10] is not pushed
+#     yet).
+ONERCCLRESETPATCH=""
+if [ -n "${VAULT_LOCAL:-}" ] && [ -f "${VAULT_LOCAL}/patches/xpu-onerccl-capture-reset.patch" ]; then
+  ONERCCLRESETPATCH="${VAULT_LOCAL}/patches/xpu-onerccl-capture-reset.patch"
+else
+  curl -fL "https://raw.githubusercontent.com/${V}/main/patches/xpu-onerccl-capture-reset.patch" -o /tmp/onerccl-reset.patch 2>/dev/null
+  [ -s /tmp/onerccl-reset.patch ] && ONERCCLRESETPATCH=/tmp/onerccl-reset.patch
+fi
+if [ -z "$ONERCCLRESETPATCH" ]; then
+  echo "FATAL: cannot fetch patches/xpu-onerccl-capture-reset.patch (raw URL 404 —" \
+  echo "       the vault's main carrying [10] is not pushed yet). Fix: 'git push" \
+  echo "       origin main' in marcinkuk/vllm-2xb50, or set" \
+  echo "       VAULT_LOCAL=/path/to/local/vllm-2xb50-checkout and re-run."; exit 1;
+fi
+git apply "$ONERCCLRESETPATCH" || { echo "FATAL: xpu-onerccl-capture-reset patch no longer applies on ${HASH}."; \
+  echo "       The patch adds XpuCommunicator.reset_after_graph_capture() and a call site" \
+  echo "       in vllm/v1/worker/gpu/cudagraph_utils.py (after the eager warmup, before" \
+  echo "       the PIECEWISE/FULL capture). It anchors on the VLLM_BATCH_INVARIANT branch" \
+  echo "       of XpuCommunicator.all_reduce and on the 'CG Capture: mode=' warmup/capture" \
+  echo "       block of CudaGraphManager.capture. Upstream drift: re-hunk (update the" \
+  echo "       'index' hashes + context) and re-run."; exit 1; }
+NAME=${NAME}-onercclreset
+
 # 11. Build the XPU image (graphs-capable).
 docker build --cpuset-cpus="0" --memory="16g" --no-cache -f docker/Dockerfile.xpu -t vllm-intel-xpu:${NAME} .
 
@@ -667,4 +759,9 @@ echo "         the balanced default; 'nc' = norm correction)"
 echo "       or turboquant_k8v4 (8-bit keys) / turboquant_k3v4_nc (3-bit keys) / turboquant_3bit_nc."
 echo "     It fixes the TurboQuant + MTP (n=3) repetition-collapse / IMA bug (issue #52475)."
 echo "     The default --kv-cache-dtype (auto/bf16) does not touch it."
+echo "[10] onercclreset ports the unmerged upstream #58415 (fixed placement): after"
+echo "     every graph-capture warmup it issues one tiny eager all-reduce to reset"
+echo "     oneCCL's collective chain, so the next capture's torch.xpu.synchronize()"
+echo "     cannot hit UR_RESULT_ERROR_DEVICE_LOST. Fixes the 10-06 startup crash"
+echo "     (vllm #60379, TP=2 + MTP + GDN) and vllm #58388. No-op on TP=1."
 echo "Remember the canary: 5 deterministic prompts, temp=0, sha256 vs eager before trusting graphs."
