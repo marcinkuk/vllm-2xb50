@@ -465,7 +465,7 @@ if [ "$era_ok" != 1 ]; then
   echo "       5463fe49, the #57652 merge, 2026-09-30 — the [2] mtpeagle test"
   echo "       hunk is anchored on the EOF #57652 appended). Fix: 'git fetch origin &&"
   echo "       git reset --hard origin/main' and re-run. Known-good main for"
-  echo "       this patch set: 5463fe49 (2026-09-30) .. c4df37d (2026-09-30,"
+  echo "       this patch set: 5463fe49 (2026-09-30) .. c4cd88d9fe (2026-10-08,"
   echo "       verified)."
   exit 1
 fi
@@ -507,9 +507,15 @@ NAME=${NAME}-noembed
 
 # 5. MTP vocab-truncated draft head (40960-token drafter head). Not upstream.
 #    MUST come AFTER step 4 (embed): its pre-image includes the embed patch's
-#    lines in qwen3_5_mtp.py.
+#    lines in qwen3_5_mtp.py. Re-hunked 2026-10-08 for #60152 (e572e02d21,
+#    merged 2026-10-07) which rewrote qwen3_5_mtp.py's load_weights remap into
+#    is_unused_checkpoint_weight() + a flat if/elif, breaking this patch's
+#    4th hunk; that hunk now anchors on is_unused_checkpoint_weight (the 10-06
+#    #60152-less pre-image is gone from main). Hunks 1-3 are unchanged. Full
+#    12-patch chain strict-applies clean on c4cd88d9fe (2026-10-08) — known-good
+#    era extended 5463fe49 .. c4cd88d9fe.
 curl -L "https://raw.githubusercontent.com/${V}/main/qwen35-mtp-draft-vocab.patch" -o /tmp/mtp-vocab.patch
-git apply /tmp/mtp-vocab.patch || { echo "FATAL: mtp-vocab patch no longer applies on ${HASH} (apply AFTER embed)"; exit 1; }
+git apply /tmp/mtp-vocab.patch || { echo "FATAL: mtp-vocab patch no longer applies on ${HASH} (apply AFTER embed; re-hunk hunk4 onto the current load_weights remap)"; exit 1; }
 NAME=${NAME}-mtp
 
 # 6. XPU getMemoryInfo zero-free fallback (CySpiegel #53990, open).

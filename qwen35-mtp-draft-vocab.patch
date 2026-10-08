@@ -1,5 +1,5 @@
 diff --git a/vllm/model_executor/models/qwen3_5_mtp.py b/vllm/model_executor/models/qwen3_5_mtp.py
-index d2d924c1cc..a759b91e56 100644
+index cae730b879..2fdec90c52 100644
 --- a/vllm/model_executor/models/qwen3_5_mtp.py
 +++ b/vllm/model_executor/models/qwen3_5_mtp.py
 @@ -89,6 +89,26 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
@@ -29,7 +29,7 @@ index d2d924c1cc..a759b91e56 100644
          # Workaround: mtp.fc is stored as BF16 in NVFP4 checkpoints but is
          # missing from hf_quant_config.json exclude_modules. Force unquantized.
          # Ref: https://github.com/vllm-project/vllm/pull/38650
-@@ -257,6 +277,12 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal, SupportsPP):
+@@ -250,6 +270,12 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal, SupportsPP):
              self.lm_head = PPMissingLayer()
  
          self.logits_processor = LogitsProcessor(config.vocab_size)
@@ -42,7 +42,7 @@ index d2d924c1cc..a759b91e56 100644
  
          self.make_empty_intermediate_tensors = (
              self.model.make_empty_intermediate_tensors
-@@ -307,11 +333,26 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal, SupportsPP):
+@@ -300,6 +326,18 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal, SupportsPP):
          hidden_states: torch.Tensor,
          spec_step_idx: int = 0,
      ) -> torch.Tensor | None:
@@ -60,12 +60,14 @@ index d2d924c1cc..a759b91e56 100644
 +            return full
          return self.logits_processor(self.lm_head, hidden_states)
  
+     def is_unused_checkpoint_weight(self, name: str) -> bool:
+@@ -310,6 +348,9 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal, SupportsPP):
      def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
          def remap_weight_names(weights):
              for name, weight in weights:
 +                # syv patch: skip the truncated draft head when it is disabled
 +                if "draft_lm_head" in name and self.model.draft_lm_head is None:
 +                    continue
+                 if self.is_unused_checkpoint_weight(name):
+                     continue
                  if name.startswith("mtp."):
-                     name = name.replace("mtp.", "model.")
-                 elif any(key in name for key in ["embed_tokens", "lm_head"]):
