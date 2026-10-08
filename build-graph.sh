@@ -737,7 +737,53 @@ git apply "$ONERCCLRESETPATCH" || { echo "FATAL: xpu-onerccl-capture-reset patch
   echo "       'index' hashes + context) and re-run."; exit 1; }
 NAME=${NAME}-onercclreset
 
-# 11. Build the XPU image (graphs-capable).
+# 11. GDN capture-dummy spec-gate (the #60379 startup crash — the real fix).
+#     #56531 (0eac152707, in every base since 10-06) deleted the GDN gate's
+#     zero-draft clause, so the all-zero-draft cudagraph CAPTURE dummy now runs
+#     the speculative path, whose kernels issue a tensor-parallel oneCCL
+#     collective INSIDE the graph-capture window. On XPU (Battlemage, TP=2) a
+#     oneCCL collective recorded into a command graph makes the capture's
+#     torch.xpu.synchronize() abort with UR_RESULT_ERROR_DEVICE_LOST (20): the
+#     engine dies at startup before serving a request (upstream issue #60379).
+#     [10]/#58415 (post-warmup chain reset) does NOT fix it — the collective is
+#     recorded mid-capture, after the reset point; the 10-07 build (which has
+#     [10]) still crashed, which is what refuted the "#60379 fixed by #58415"
+#     claim. This patch makes GDNAttentionMetadataBuilder.build_for_cudagraph_
+#     capture() pass a None draft tensor, so build()'s top-level
+#     (num_decode_draft_tokens_cpu is None) guard demotes the capture dummy to
+#     the non-spec path — the exact metadata the last working base (c32495d58f,
+#     2026-10-05) produced, so the captured graphs are byte-identical to the
+#     working build. Steady-state decode still takes the #56531 spec path (the
+#     zero-draft accepted-offset correctness fix, issue #53912) via
+#     mamba_hybrid.prepare_attn -> build_attn_metadata(build()); this method is
+#     only invoked for cudagraph capture (attn_utils build_attn_metadata,
+#     for_cudagraph_capture=True). Applies on 0.30.1 (4ea0c28bc) and 0.31.1
+#     (2a54f6b625) — the target line is identical in both. Self-contained: one
+#     method, no other file touched, so it applies cleanly on top of [1]-[10].
+#     Drop it once upstream re-gates the capture dummy out of the spec path
+#     (a #56531 fix or a #60379 land); re-check the head weekly.
+#     Fetched the same way as [9c]-[10] (local VAULT_LOCAL first, raw URL
+#     fallback, clear FATAL if the vault's main carrying [11] is not pushed).
+GDNCAPGATEPATCH=""
+if [ -n "${VAULT_LOCAL:-}" ] && [ -f "${VAULT_LOCAL}/patches/gdn-capture-gate-56531.patch" ]; then
+  GDNCAPGATEPATCH="${VAULT_LOCAL}/patches/gdn-capture-gate-56531.patch"
+else
+  curl -fL "https://raw.githubusercontent.com/${V}/main/patches/gdn-capture-gate-56531.patch" -o /tmp/gdn-capture-gate.patch 2>/dev/null
+  [ -s /tmp/gdn-capture-gate.patch ] && GDNCAPGATEPATCH=/tmp/gdn-capture-gate.patch
+fi
+if [ -z "$GDNCAPGATEPATCH" ]; then
+  echo "FATAL: cannot fetch patches/gdn-capture-gate-56531.patch (raw URL 404 —"
+  echo "       the vault's main may not be pushed yet). Set"
+  echo "       VAULT_LOCAL=/path/to/local/vllm-2xb50-checkout and re-run."; exit 1;
+fi
+git apply "$GDNCAPGATEPATCH" || { echo "FATAL: gdn-capture-gate-56531 patch no longer applies on ${HASH}."; \
+  echo "       It rewrites GDNAttentionMetadataBuilder.build_for_cudagraph_capture() in" \
+  echo "       vllm/v1/attention/backends/gdn_attn.py to pass a None draft tensor to" \
+  echo "       build(). Upstream drift: re-hunk (update the 'index' hash + context)" \
+  echo "       and re-run."; exit 1; }
+NAME=${NAME}-gdnccgate
+
+# 12. Build the XPU image (graphs-capable).
 #     Tag-length guard: Docker image tags cap at 128 chars, and the NAME
 #     accumulates one short suffix per applied patch, so adding a patch can
 #     silently push the tag over the cap and fail only at this docker build
@@ -777,6 +823,17 @@ echo "     The default --kv-cache-dtype (auto/bf16) does not touch it."
 echo "[10] onercclreset ports the unmerged upstream #58415 (fixed placement): after"
 echo "     every graph-capture warmup it issues one tiny eager all-reduce to reset"
 echo "     oneCCL's collective chain, so the next capture's torch.xpu.synchronize()"
-echo "     cannot hit UR_RESULT_ERROR_DEVICE_LOST. Fixes the 10-06 startup crash"
-echo "     (vllm #60379, TP=2 + MTP + GDN) and vllm #58388. No-op on TP=1."
+echo "     cannot hit a stale chain. Relevant to vllm #58388 (post-startup large-"
+echo "     prefill variant). NOTE: it does NOT fix the #60379 startup crash — the"
+echo "     10-07 build had [10] and still died at first-capture (that is what the"
+echo "     [11] gate below exists for; #60379's 'fixed by #58415' is refuted). No-op"
+echo "     on TP=1. Kept: it is a genuine oneCCL-chain hardener for #58388."
+echo "[11] gdncapgate is the REAL fix for the #60379 startup crash: it keeps the"
+echo "     all-zero-draft cudagraph capture dummy out of the GDN spec-decode path"
+echo "     (#56531 deleted the gate clause that used to do that), so no oneCCL"
+echo "     collective is recorded inside the capture and the first capture cannot"
+echo "     fault with UR_RESULT_ERROR_DEVICE_LOST. Steady-state MTP decode still"
+echo "     takes the #56531 spec path (the #53912 correctness fix) — only capture"
+echo "     metadata is affected. The captured graphs are byte-identical to the"
+echo "     last working build (base c32495d58f, 2026-10-05)."
 echo "Remember the canary: 5 deterministic prompts, temp=0, sha256 vs eager before trusting graphs."

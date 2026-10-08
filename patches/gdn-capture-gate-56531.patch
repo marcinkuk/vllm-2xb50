@@ -1,0 +1,37 @@
+diff --git a/vllm/v1/attention/backends/gdn_attn.py b/vllm/v1/attention/backends/gdn_attn.py
+index 95f6a808a5..5b1398cb0d 100644
+--- a/vllm/v1/attention/backends/gdn_attn.py
++++ b/vllm/v1/attention/backends/gdn_attn.py
+@@ -692,4 +692,31 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
+         num_decode_draft_tokens_cpu = torch.diff(m.query_start_loc_cpu).sub_(1)
+         assert num_decode_draft_tokens_cpu.shape == num_accepted_tokens.shape
+ 
+-        return self.build(0, m, num_accepted_tokens, num_decode_draft_tokens_cpu)
++        # XPU/oneCCL (marcinkuk/vllm-2xb50): a capture dummy must NEVER take the
++        # GDN spec-decode path. build() derives spec rows from
++        # num_decode_draft_tokens_cpu >= 0, and this dummy is all-zero (every
++        # row a 1-token decode), i.e. every row is a spec candidate. Pre-#56531
++        # the gate's second clause (or sum(drafts[mask]) == 0) demoted such a
++        # batch to the non-spec path, so the first capture recorded no
++        # speculative kernels. #56531 (0eac152707) deleted that clause, so the
++        # capture dummy now runs the speculative path, whose kernels issue a
++        # tensor-parallel oneCCL collective *inside* the graph capture window;
++        # on XPU (Battlemage, TP=2) a oneCCL collective recorded into a command
++        # graph makes the capture's torch.xpu.synchronize() abort with
++        # UR_RESULT_ERROR_DEVICE_LOST (20) -- the engine dies at startup before
++        # serving any request (upstream issue #60379). The [10]/#58415
++        # post-warmup oneCCL chain reset does not help, because the collective
++        # is recorded mid-capture, after the reset point.
++        # Passing None here hits build()'s top-level
++        # (num_decode_draft_tokens_cpu is None) guard, which -- like the
++        # pre-#56531 second clause -- demotes the capture dummy to the exact
++        # non-spec metadata the last working base (c32495d58f, 2026-10-05)
++        # produced, so the captured graphs are byte-identical to the working
++        # build. Steady state is untouched: decode rows still route through the
++        # #56531 spec path (the zero-draft accepted-offset correctness fix) via
++        # mamba_hybrid.prepare_attn -> build_attn_metadata(build()), which this
++        # method does not feed. We deliberately do NOT restore the removed gate
++        # clause itself: that would also demote steady-state all-rejected
++        # batches to non-spec, re-introducing the recurrent-state staleness
++        # (#53912 class) that #56531 fixed.
++        return self.build(0, m, num_accepted_tokens, None)
