@@ -71,9 +71,16 @@
 #                     UR_RESULT_ERROR_DEVICE_LOST — vllm #58388 and, since
 #                     #56531 (10-06), the startup death #60379 (TP=2 + MTP +
 #                     GDN, the exact 10-06 build). No-op on TP=1.
-#   Tag-suffix aliases (Docker tags cap at 128 chars, see the step-11 guard):
-#   [3] -> -vision, [9d] -> -hybrid, [9e] -> -tq. The full names stay in each
-#   step's comment/echo; the tag only needs to be readable/unique.
+#     [11] gdncapgate   : gate the GDN capture dummy out of the #56531
+#                     spec path (the real #60379 fix); see step 11.
+#     [12] b60off       : remove the 8 B60 GDN/SSU tuned configs that upstream
+#                     #56765 (f0a5f111f2) added; inert on this 2x B50 (no B50
+#                     config exists) but the user wants them gone. rm -f in the
+#                     build (step 12), not a git-apply patch.
+#   Tag-suffix aliases (Docker tags cap at 128 chars, see the step-13 guard):
+#   [3] -> -vision, [9d] -> -hybrid, [9e] -> -tq, [10] -> -onerccl (was
+#   -onercclreset), [11] -> -gdncc (was -gdnccgate). The full names stay in
+#   each step's comment/echo; the tag only needs to be readable/unique.
 #   [8] tritonar  : DISABLED 2026-09-24 — TP=2 one-shot Triton symmetric-
 #                   memory allreduce (opt-in VLLM_XPU_TRITON_ALLREDUCE,
 #                   upstream analog #54768 still open). Never functional on
@@ -741,7 +748,7 @@ git apply "$ONERCCLRESETPATCH" || { echo "FATAL: xpu-onerccl-capture-reset patch
   echo "       of XpuCommunicator.all_reduce and on the 'CG Capture: mode=' warmup/capture" \
   echo "       block of CudaGraphManager.capture. Upstream drift: re-hunk (update the" \
   echo "       'index' hashes + context) and re-run."; exit 1; }
-NAME=${NAME}-onercclreset
+NAME=${NAME}-onerccl
 
 # 11. GDN capture-dummy spec-gate (the #60379 startup crash — the real fix).
 #     #56531 (0eac152707, in every base since 10-06) deleted the GDN gate's
@@ -787,14 +794,43 @@ git apply "$GDNCAPGATEPATCH" || { echo "FATAL: gdn-capture-gate-56531 patch no l
   echo "       vllm/v1/attention/backends/gdn_attn.py to pass a None draft tensor to" \
   echo "       build(). Upstream drift: re-hunk (update the 'index' hash + context)" \
   echo "       and re-run."; exit 1; }
-NAME=${NAME}-gdnccgate
+NAME=${NAME}-gdncc
 
-# 12. Build the XPU image (graphs-capable).
+# 12. Remove the Intel Arc Pro B60 GDN/SSU tuned configs (upstream #56765,
+#     f0a5f111f2). #56765 added 8 selective_state_update JSON configs keyed
+#     device_name=Intel(R)_Arc(TM)_Pro_B60_Graphics; this stack is a 2x B50,
+#     which matches NONE of them (the config table has no B50 entry, so they
+#     are inert here) — but the user wants them gone so a B60-tuned variant
+#     can never be picked up by a device-name substring match or by a future
+#     base that renames the key. rm -f (not a git-apply deletion patch):
+#     idempotent, needs no content matching, and survives #56765 JSON tweaks
+#     without re-hunking. The 8 B60 files are removed; all other device
+#     configs (B70/AMD/NVIDIA) stay untouched. No tag-suffix alias: the tag
+#     was already at the 120-char guard limit, so [10]/[11] were shortened to
+#     -onerccl / -gdncc to leave room. Drop this step if #56765 is reverted
+#     upstream (it then has nothing to remove; rm -f on absent files is a
+#     no-op, so keeping it is also harmless).
+B60_SSU_DIR=vllm/model_executor/layers/mamba/ops/configs/selective_state_update
+rm -f \
+  "${B60_SSU_DIR}/headdim=128,dstate=256,device_name=Intel(R)_Arc(TM)_Pro_B60_Graphics,cache_dtype=float16.json" \
+  "${B60_SSU_DIR}/headdim=128,dstate=256,device_name=Intel(R)_Arc(TM)_Pro_B60_Graphics,cache_dtype=float32.json" \
+  "${B60_SSU_DIR}/headdim=64,dstate=128,device_name=Intel(R)_Arc(TM)_Pro_B60_Graphics,cache_dtype=float16.json" \
+  "${B60_SSU_DIR}/headdim=64,dstate=128,device_name=Intel(R)_Arc(TM)_Pro_B60_Graphics,cache_dtype=float32.json" \
+  "${B60_SSU_DIR}/headdim=64,dstate=256,device_name=Intel(R)_Arc(TM)_Pro_B60_Graphics,cache_dtype=float16.json" \
+  "${B60_SSU_DIR}/headdim=64,dstate=256,device_name=Intel(R)_Arc(TM)_Pro_B60_Graphics,cache_dtype=float32.json" \
+  "${B60_SSU_DIR}/headdim=64,dstate=64,device_name=Intel(R)_Arc(TM)_Pro_B60_Graphics,cache_dtype=float16.json" \
+  "${B60_SSU_DIR}/headdim=64,dstate=64,device_name=Intel(R)_Arc(TM)_Pro_B60_Graphics,cache_dtype=float32.json"
+NAME=${NAME}-b60off
+
+# 13. Build the XPU image (graphs-capable).
 #     Tag-length guard: Docker image tags cap at 128 chars, and the NAME
 #     accumulates one short suffix per applied patch, so adding a patch can
 #     silently push the tag over the cap and fail only at this docker build
 #     step (10-07: 136 chars -> "invalid reference format"). Keep new patch
 #     suffixes SHORT (see the -hybrid / -tq aliases above) and check here.
+#     As of 2026-10-09 [10] is aliased -onerccl (was -onercclreset) and
+#     [11] is -gdncc (was -gdnccgate) to keep room for [12] -b60off; the
+#     full names stay in each step's comments/echo.
 if [ ${#NAME} -gt 120 ]; then
   echo "FATAL: image tag vllm-intel-xpu:${NAME} is ${#NAME} chars (Docker cap 128)."
   echo "       Shorten a patch's NAME suffix in its step above (the full name"
@@ -842,4 +878,9 @@ echo "     fault with UR_RESULT_ERROR_DEVICE_LOST. Steady-state MTP decode still
 echo "     takes the #56531 spec path (the #53912 correctness fix) — only capture"
 echo "     metadata is affected. The captured graphs are byte-identical to the"
 echo "     last working build (base c32495d58f, 2026-10-05)."
+echo "[12] b60off removed the 8 Intel Arc Pro B60 GDN/SSU tuned configs (upstream"
+echo "     #56765) from the image: they are inert on this 2x B50 (no B50 config"
+echo "     exists in the table) and the user asked for them gone. No runtime"
+echo "     effect on B50; only the B60-specific JSON files are missing from the"
+echo "     wheel. All other device configs (B70/AMD/NVIDIA) are untouched."
 echo "Remember the canary: 5 deterministic prompts, temp=0, sha256 vs eager before trusting graphs."
