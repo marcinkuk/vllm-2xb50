@@ -1,13 +1,14 @@
-From 70b756d67f000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 9f780be530e8350c3e252c57c2fdf18cd77f5ef2 Mon Sep 17 00:00:00 2001
 From: Windless84 <15976122+Windless84@users.noreply.github.com>
 Date: Wed, 9 Sep 2026 02:53:01 -0400
-Subject: [PATCH] Identify a separately prefixed drafter's KV groups; warn about the all-groups draft fallback only when the block drop is on
+Subject: [PATCH] Identify a separately prefixed drafter's KV groups; warn
+ about the all-groups draft fallback only when the block drop is on
 
 Qwen4ExpMTP registers its attention layers under "mtp." after the target's
 "model." layers, but no group carried a spec marker and the DeepseekV4
 positional fallback is model-gated, so _annotate_eagle_groups flagged nothing,
 the coordinator treated every KV group as a draft group and Mamba groups
-could never serve a prefix hit (kv_cache_utils.py:1893 warning; zero hits
+could never serve a prefix hit (kv_cache_planning.py warning; zero hits
 across a full replay). Flag every group holding a layer under the drafter's
 distinct top-level prefix; drafters sharing the target's prefix keep the old
 conservative fallback. The warning now keys on use_eagle_block_drop(), which
@@ -15,20 +16,29 @@ is what KVCacheManager actually receives.
 
 Signed-off-by: Windless84 <15976122+Windless84@users.noreply.github.com>
 (cherry picked from commit 4a365dee4aed8ae3135213b4cf6ce04f6d82e756)
-(rebased onto vllm main fc2c801a - 2026-09-30; #55390 is merged upstream,
+(rebased onto vllm main c4df37d - 2026-09-30; #55390 is merged upstream,
  so this patch carries ONLY the #56026 delta on top of current main.
  Test hunk re-anchored onto the EOF that #57652 (5463fe49, merged
- 2026-09-30) appended to test_kv_cache_utils.py; patch era now starts at 5463fe49.)
+ 2026-09-30) appended to test_kv_cache_utils.py; patch era now starts at
+ 5463fe49.)
+(re-hunked 2026-10-14 onto main 7840bed: upstream #61183 (df6c7ad0) moved
+ _annotate_eagle_groups / _warn_if_unannotated_eagle_mamba from
+ vllm/v1/core/kv_cache_utils.py to the new vllm/v1/core/kv_cache_planning.py,
+ and split the tests into tests/v1/core/test_kv_cache_planning.py. Both
+ hunks re-aimed at the new locations; all 113 added / 12 removed lines are
+ byte-identical to the 2026-09-30 re-hunk. The era-gate markers
+ _uses_trailing_mtp_layers and kv_cache_groups_tp_replicas live in
+ kv_cache_planning.py from this base onward.)
 ---
- tests/v1/core/test_kv_cache_utils.py | 54 +++++++++++++++++++++++++++
- vllm/v1/core/kv_cache_utils.py       | 71 ++++++++++++++++++++++++++++++------
+ tests/v1/core/test_kv_cache_planning.py | 54 +++++++++++++++++++
+ vllm/v1/core/kv_cache_planning.py       | 71 ++++++++++++++++++++-----
  2 files changed, 113 insertions(+), 12 deletions(-)
 
-diff --git a/tests/v1/core/test_kv_cache_utils.py b/tests/v1/core/test_kv_cache_utils.py
-index 0c56e89d..dfab33e5 100644
---- a/tests/v1/core/test_kv_cache_utils.py
-+++ b/tests/v1/core/test_kv_cache_utils.py
-@@ -4734,3 +4734,57 @@ def test_kv_cache_groups_tp_replicas(specs, tp_size, dcp_size, expected):
+diff --git a/tests/v1/core/test_kv_cache_planning.py b/tests/v1/core/test_kv_cache_planning.py
+index 6292868..4677eaf 100644
+--- a/tests/v1/core/test_kv_cache_planning.py
++++ b/tests/v1/core/test_kv_cache_planning.py
+@@ -2282,3 +2282,57 @@ def test_kv_cache_groups_tp_replicas(specs, tp_size, dcp_size, expected):
      """Replicas are the gcd of each layer's tp_size // max_tp_shards."""
      groups = [KVCacheGroupSpec([f"l.{i}"], spec) for i, spec in enumerate(specs)]
      assert kv_cache_groups_tp_replicas(groups, tp_size, dcp_size) == expected
@@ -42,7 +52,7 @@ index 0c56e89d..dfab33e5 100644
 +    groups, stay unflagged so they keep serving prefix hits."""
 +    from unittest.mock import Mock
 +
-+    from vllm.v1.core.kv_cache_utils import _annotate_eagle_groups
++    from vllm.v1.core.kv_cache_planning import _annotate_eagle_groups
 +
 +    attn = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
 +    mamba = MambaSpec(shapes=((1, 1),), dtypes=(torch.float32,), block_size=16)
@@ -86,11 +96,11 @@ index 0c56e89d..dfab33e5 100644
 +        vllm_config, kv_cache_spec, groups2, use_trailing_layer_fallback=True
 +    )
 +    assert [g.is_eagle_group for g in groups2] == [False, False]
-diff --git a/vllm/v1/core/kv_cache_utils.py b/vllm/v1/core/kv_cache_utils.py
-index af1112c54a..384adfa4d6 100644
---- a/vllm/v1/core/kv_cache_utils.py
-+++ b/vllm/v1/core/kv_cache_utils.py
-@@ -2172,20 +2172,29 @@ def _annotate_eagle_groups(
+diff --git a/vllm/v1/core/kv_cache_planning.py b/vllm/v1/core/kv_cache_planning.py
+index 6e258a6..bb43808 100644
+--- a/vllm/v1/core/kv_cache_planning.py
++++ b/vllm/v1/core/kv_cache_planning.py
+@@ -1054,20 +1054,29 @@ def _annotate_eagle_groups(
         spec merging, wherever grouping happens to land. It is sufficient but
         not necessary: a drafter whose spec is indistinguishable from the
         target's cannot be found this way.
@@ -129,7 +139,7 @@ index af1112c54a..384adfa4d6 100644
          kv_cache_groups: Groups to annotate in place.
          use_trailing_layer_fallback: Enable rule 2. Callers gate this on
              ``_uses_trailing_mtp_layers``.
-@@ -2202,11 +2211,45 @@ def _annotate_eagle_groups(
+@@ -1084,11 +1093,45 @@ def _annotate_eagle_groups(
          ):
              group.is_eagle_group = True
  
@@ -149,8 +159,7 @@ index af1112c54a..384adfa4d6 100644
 +    #    hold them.
 +    names = list(kv_cache_spec)
 +    if len(names) < 2:
-         return
--    last_layer = next(reversed(kv_cache_spec))
++        return
 +    first_prefix = names[0].split(".", 1)[0]
 +    last_prefix = names[-1].split(".", 1)[0]
 +    if last_prefix != first_prefix:
@@ -168,7 +177,8 @@ index af1112c54a..384adfa4d6 100644
 +        for group in kv_cache_groups:
 +            if drafter_layers.intersection(group.layer_names):
 +                group.is_eagle_group = True
-+        return
+         return
+-    last_layer = next(reversed(kv_cache_spec))
 +
 +    # The drafter reuses the target's own decoder layer (same top-level
 +    # prefix, e.g. DeepseekV4): flag whichever group holds the last
@@ -177,7 +187,7 @@ index af1112c54a..384adfa4d6 100644
      for group in kv_cache_groups:
          if last_layer in group.layer_names:
              group.is_eagle_group = True
-@@ -2225,7 +2268,11 @@ def _warn_if_unannotated_eagle_mamba(
+@@ -1107,7 +1150,11 @@ def _warn_if_unannotated_eagle_mamba(
  
      """
      spec_config = vllm_config.speculative_config
@@ -190,4 +200,6 @@ index af1112c54a..384adfa4d6 100644
          return
      if any(group.is_eagle_group for group in kv_cache_groups):
          return
+-- 
+2.47.3
 

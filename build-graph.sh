@@ -433,39 +433,41 @@ V=marcinkuk/vllm-2xb50   # this repo — single source of the patches
 #     era, so check the base's era BEFORE trying to apply anything, and fail
 #     with an actionable message instead of a cryptic per-patch "patch does
 #     not apply". (This is the "patch no longer applies" guard, made specific.)
-#     The [2] mtpeagle patch is the #56026 delta ON TOP of merged #55390
-#     (0bce411a, 2026-09-22), so its two files (kv_cache_utils.py and its test)
-#     only match main from that merge onward. Since the 2026-09-30 re-hunk the
-#     test hunk is anchored on the EOF that #57652 (5463fe49, merged
-#     2026-09-30) appended — test_kv_cache_groups_tp_replicas, whose helper
-#     kv_cache_groups_tp_replicas() it calls landed in kv_cache_utils.py in
-#     that same commit — so the pre-image now REQUIRES main at/after 5463fe49.
-#     Two era markers are checked: _uses_trailing_mtp_layers (the #55390
-#     merge, 0bce411a) and kv_cache_groups_tp_replicas (the #57652 merge,
-#     5463fe49) — the latter is the binding one. The VLLM_BATCH_INVARIANT
-#     marker (#55881) was the anchor of the now-DISABLED [8] tritonar patch,
-#     so it is no longer a build requirement (it is still in main; kept here
-#     for reference only, not checked).
+#     The [2] mtpeagle patch is the #56026 delta (still open upstream). Its two
+#     files used to be kv_cache_utils.py + tests/v1/core/test_kv_cache_utils.py,
+#     but #61183 (df6c7ad031, merged 2026-10-13, "[Core][Refactor] Move KV cache
+#     planning logic to kv_cache_planning.py") split that logic into a NEW file,
+#     vllm/v1/core/kv_cache_planning.py, and its tests into
+#     tests/v1/core/test_kv_cache_planning.py. Both era markers below —
+#     _uses_trailing_mtp_layers (from merged #55390/0bce411a) and
+#     kv_cache_groups_tp_replicas (from #57652) — MOVED into kv_cache_planning.py
+#     in that same commit and no longer exist in kv_cache_utils.py, so the
+#     re-hunked [2] (which now targets kv_cache_planning.py + the split test
+#     file) only matches main at/after df6c7ad031. That is the binding
+#     era-start (verified on main 7840bede, 2026-10-14). The VLLM_BATCH_INVARIANT
+#     marker (#55881) was the anchor of the now-DISABLED [8] tritonar patch, so
+#     it is no longer a build requirement (it is still in main; kept here for
+#     reference only, not checked).
 era_ok=1
 for marker in \
-  "vllm/v1/core/kv_cache_utils.py:_uses_trailing_mtp_layers" \
-  "vllm/v1/core/kv_cache_utils.py:kv_cache_groups_tp_replicas"; do
+  "vllm/v1/core/kv_cache_planning.py:_uses_trailing_mtp_layers" \
+  "vllm/v1/core/kv_cache_planning.py:kv_cache_groups_tp_replicas"; do
   f="${marker%%:*}"; pat="${marker##*:}"
   if ! git grep -q "$pat" -- "$f"; then
     era_ok=0
-    if [ "$pat" = "kv_cache_groups_tp_replicas" ]; then
-      echo "NOTE: base ${HASH} predates the #57652 merge (5463fe49, 2026-09-30)."
-    else
-      echo "NOTE: base ${HASH} predates the #55390 merge (0bce411a, 2026-09-22)."
-    fi
+    echo "NOTE: base ${HASH} predates the #61183 merge (df6c7ad031, 2026-10-13);"
+    echo "      ${pat} is not yet in vllm/v1/core/kv_cache_planning.py (it was"
+    echo "      moved out of kv_cache_utils.py by that refactor)."
   fi
 done
 if [ "$era_ok" != 1 ]; then
   echo "FATAL: base ${HASH} is outside the verified patch era (needs main at/after"
-  echo "       5463fe49, the #57652 merge, 2026-09-30 — the [2] mtpeagle test"
-  echo "       hunk is anchored on the EOF #57652 appended). Fix: 'git fetch origin &&"
+  echo "       df6c7ad031, the #61183 merge, 2026-10-13, '[Core][Refactor] Move KV"
+  echo "       cache planning logic to kv_cache_planning.py'. The [2] mtpeagle patch"
+  echo "       now targets kv_cache_planning.py and the split-out test file, which"
+  echo "       did not exist before that merge. Fix: 'git fetch origin &&"
   echo "       git reset --hard origin/main' and re-run. Known-good main for"
-  echo "       this patch set: 5463fe49 (2026-09-30) .. c4cd88d9fe (2026-10-08,"
+  echo "       this patch set: df6c7ad031 (2026-10-13) .. 7840bede (2026-10-14,"
   echo "       verified)."
   exit 1
 fi
@@ -476,22 +478,24 @@ fi
 #    #56026 delta remains. It flags every KV group holding a separately-prefixed
 #    drafter's layers as a draft group, and keys the all-groups draft fallback
 #    warning on use_eagle_block_drop(). Standalone git-format patch; re-hunked
-#    onto current main c4df37d (2026-09-30). Re-hunk 09-30: #57652 (5463fe49)
-#    appended test_kv_cache_groups_tp_replicas to the END of
-#    test_kv_cache_utils.py, which shifted this patch's EOF-anchored test hunk
-#    (kv_cache_utils.py itself was untouched by #57652 and still applies at the
-#    same offset) — only the test hunk's anchor/context changed, all 54 added
-#    lines are byte-identical to the 2026-09-23 re-hunk.
+#    onto current main 7840bede (2026-10-14). Its two files were
+#    kv_cache_utils.py + tests/v1/core/test_kv_cache_utils.py, but #61183
+#    (df6c7ad031, merged 2026-10-13) split the KV-cache-planning logic into a NEW
+#    file, vllm/v1/core/kv_cache_planning.py, and its tests into
+#    tests/v1/core/test_kv_cache_planning.py — so this patch now targets those
+#    two files (the _annotate_eagle_groups() fix body is byte-identical to the
+#    #56026 delta; only the target path + test anchor moved).
 curl -L "https://raw.githubusercontent.com/${V}/main/patches/0001-56026-on-current-main.patch" -o /tmp/mtpeagle.patch
 git apply /tmp/mtpeagle.patch || { echo "FATAL: 56026 patch no longer applies on ${HASH}."; \
-  echo "       The 56026 patch is the #56026 delta ON TOP of merged #55390 (0bce411a);" \
-  echo "       its two files (kv_cache_utils.py, test_kv_cache_utils.py) must match main" \
-  echo "       blob-for-blob, verified for 5463fe49 .. c4df37d (2026-09-30). Upstream" \
-  echo "       drift: re-hunk the patch onto current main (update the 'index' hashes and" \
-  echo "       the hunk line numbers) and re-run; if the new drift lands in the test" \
-  echo "       file's EOF again, only the test hunk's anchor needs re-aiming. (If you saw" \
-  echo "       'mtpeagle (55390+56026)' here, your script copy is stale — pull this repo" \
-  echo "       and re-run; #55390 is merged, patch is split.)"; exit 1; }
+  echo "       The 56026 patch is the #56026 delta (still open upstream); it now targets" \
+  echo "       vllm/v1/core/kv_cache_planning.py + tests/v1/core/test_kv_cache_planning.py" \
+  echo "       (moved out of kv_cache_utils.py by #61183, df6c7ad031) and must match main" \
+  echo "       blob-for-blob, verified for df6c7ad031 (2026-10-13) .. 7840bede (2026-10-14)." \
+  echo "       Upstream drift: re-hunk the patch onto current main (update the 'index'" \
+  echo "       hashes and the hunk line numbers) and re-run; if the new drift lands in the" \
+  echo "       test file's EOF again, only the test hunk's anchor needs re-aiming." \
+  echo "       (If you saw 'mtpeagle (55390+56026)' here, your script copy is stale —" \
+  echo "       pull this repo and re-run; #55390 is merged, patch is split.)"; exit 1; }
 NAME=${NAME}-mtpeagle
 
 # 3. Vision-tower CPU offload (VLLM_VISION_CPU_OFFLOAD_GB). Not upstream.
