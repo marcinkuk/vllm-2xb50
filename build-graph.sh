@@ -793,7 +793,43 @@ git apply "$GDNCAPGATEPATCH" || { echo "FATAL: gdn-capture-gate-56531 patch no l
   echo "       and re-run."; exit 1; }
 NAME=${NAME}-gdnccgate
 
-# 12. Build the XPU image (graphs-capable).
+# 12. GDN zero-draft routing restore (revert #56531 steady-state — the build-64
+#     MTP acceptance collapse). #56531 (0eac152707) re-routes EVERY non-prefill
+#     decode row, including zero-draft rows, through the GDN speculative path,
+#     in three places: gdn_attn.build() drops its "or sum(drafts)==0" guard,
+#     mamba_hybrid drops the "num_draft_tokens_per_req>0" requirement, and
+#     gpu_model_runner flips use_spec_decode to "speculative_config is not
+#     None" (2 sites) + stamps zero-draft rows with num_decode_draft_tokens=0.
+#     On this GDN hybrid + MTP drafter a single-request verify step whose only
+#     non-prefill row is a zero-draft decode is mis-routed through the spec
+#     path and reads its recurrent state at the wrong slot: the first drafted
+#     token is effectively random and all MTP follow-on steps are rejected,
+#     collapsing acceptance to ~0.8-3.4% (vs ~50-69% on the 63 c32495d58 base;
+#     same checkpoint, same command, n=3). This reverts ONLY those three
+#     steady-state hunks to the 63 form, while LEAVING [11]'s capture path
+#     (build_for_cudagraph_capture -> build(..., None)) intact so the #60379
+#     oneCCL-in-capture fix survives. #58463 and the AITER/FlashInfer
+#     prefill-checkpoint machinery are untouched (neither runs in this XPU
+#     steady-state decode path). Applies clean on top of [11] in either order
+#     (verified 2026-10-15); re-hunk if these three files drift again upstream.
+ZEDRTPATCH=""
+if [ -n "${VAULT_LOCAL:-}" ] && [ -f "${VAULT_LOCAL}/patches/gdn-zero-draft-routing-56531-revert.patch" ]; then
+  ZEDRTPATCH="${VAULT_LOCAL}/patches/gdn-zero-draft-routing-56531-revert.patch"
+else
+  curl -fL "https://raw.githubusercontent.com/${V}/main/patches/gdn-zero-draft-routing-56531-revert.patch" -o /tmp/gdn-zero-draft-routing.patch 2>/dev/null
+  [ -s /tmp/gdn-zero-draft-routing.patch ] && ZEDRTPATCH=/tmp/gdn-zero-draft-routing.patch
+fi
+if [ -z "$ZEDRTPATCH" ]; then
+  echo "FATAL: cannot fetch patches/gdn-zero-draft-routing-56531-revert.patch (raw URL 404 —"
+  echo "       the vault's main may not be pushed yet). Set"
+  echo "       VAULT_LOCAL=/path/to/local/vllm-2xb50-checkout and re-run."; exit 1;
+fi
+git apply "$ZEDRTPATCH" || { echo "FATAL: gdn-zero-draft-routing-56531-revert patch no longer applies on ${HASH}."; \
+  echo "       It reverts the #56531 steady-state zero-draft routing in gdn_attn.py," \
+  echo "       mamba_hybrid.py and gpu_model_runner.py. Upstream drift: re-hunk and re-run."; exit 1; }
+NAME=${NAME}-zdroute
+
+# 13. Build the XPU image (graphs-capable).
 #     Tag-length guard: Docker image tags cap at 128 chars, and the NAME
 #     accumulates one short suffix per applied patch, so adding a patch can
 #     silently push the tag over the cap and fail only at this docker build
