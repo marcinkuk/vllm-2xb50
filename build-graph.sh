@@ -187,18 +187,23 @@
 #
 # Apply order matters: embed-quant [4] BEFORE mtp-vocab [5]; the XPU patches
 # [6]-[7] are independent of the MTP block but applied after it, giving the
-# validated 7-patch flow (mtpeagle,vision,embed,mtpvocab,getmem,grammar,
-# mtphitfix) — [8] tritonar is DISABLED (2026-09-24) and [9] memprof was
-# superseded by upstream #51600 (2026-09-24). [9b] mtphitfix touches
-# single_type_kv_cache_manager.py, [9c] fstier only
-# vllm/v1/kv_offload/tiering/fs/manager.py (+ its test + docs), and [9d]
-# hybridprefill only vllm/v1/worker/gpu_model_runner.py (+ its test), [9e]
-# turboquantspec only vllm/v1/attention/backends/turboquant_attn.py, and [10]
-# onercclreset only vllm/distributed/device_communicators/xpu_communicator.py
-# + vllm/v1/worker/gpu/cudagraph_utils.py — none of the earlier ENABLED
-# patches modify any of those files ([8] tritonar also touches
-# xpu_communicator.py but is DISABLED), so [9b] then [9c] then [9d] then [9e]
-# then [10] go last, in that order.
+# validated 12-patch flow (visionoffload,embed,mtpvocab,getmem,grammar,
+# mtphitfix,fstier,hybridprefill,turboquantspec,onercclreset,gdn-capture-gate,
+# gdn-zero-draft-routing) — [2] mtpeagle is DROPPED (2026-10-17, superseded by
+# upstream #61455's is_draft tag), [8] tritonar is DISABLED (2026-09-24), and
+# [9] graphmemprof was superseded by upstream #51600 (2026-09-24). The later
+# steps each touch a file none of the earlier ENABLED patches modify: [9b]
+# mtphitfix only vllm/v1/core/single_type_kv_cache_manager.py, [9c] fstier only
+# vllm/v1/kv_offload/tiering/fs/manager.py (+ its test + docs), [9d]
+# hybridprefill and [12] gdn-zero-draft-routing both touch
+# vllm/v1/worker/gpu_model_runner.py (+ its test) so they must apply in chain
+# order, [9e] turboquantspec only vllm/v1/attention/backends/turboquant_attn.py,
+# [10] onercclreset only vllm/distributed/device_communicators/xpu_communicator.py
+# + vllm/v1/worker/gpu/cudagraph_utils.py, [11] gdn-capture-gate only
+# vllm/v1/attention/backends/gdn_attn.py, and [12] gdn-zero-draft-routing
+# vllm/v1/attention/backends/gdn_attn.py + mamba_hybrid.py + gpu_model_runner.py
+# ([8] tritonar also touches xpu_communicator.py but is DISABLED) — so [9b] then
+# [9c] then [9d] then [9e] then [10] then [11] then [12] go last, in that order.
 # Every applied patch FAILS THE BUILD loudly if it no longer applies
 # (upstream drift); none silently skip.
 #
@@ -414,6 +419,36 @@
 #   #58415 or an equivalent; when that happens drop step 10 (same lifecycle
 #   as [9] for #51600).
 
+#   RE-VERIFIED 2026-10-17 (added [12] gdn-zero-draft-routing; era-gate re-pointed;
+#   [2] mtpeagle DROPPED): upstream #61455 (c3de0b37, merged 2026-10-17, "[Core][Spec
+#   Decode] Replace EAGLE group heuristics with explicit draft-layer tags") DELETED
+#   the positional _annotate_eagle_groups()/_uses_trailing_mtp_layers heuristic that
+#   [2] mtpeagle (the #56026 delta) rewrote, and replaced it with an explicit
+#   KVCacheSpec.is_draft tag (drafter attention layers marked is_draft_layer ->
+#   get_kv_cache_spec() copies it into spec.is_draft -> get_kv_cache_configs()
+#   flags every group holding an is_draft spec as is_eagle_group). That is the
+#   upstream, maintainer-reviewed, tested implementation of exactly what [2] did
+#   (plus more), so:
+#     (1) [2] mtpeagle is DROPPED (step 2 is now a comment; the
+#         0001-56026-on-current-main.patch file is kept as provenance). Re-hunking
+#         it would mean re-implementing #61455 in a custom form.
+#     (2) the base-era gate (1b) now keys on the #61455 is_draft marker in
+#         vllm/v1/kv_cache_interface.py instead of the deleted
+#         _uses_trailing_mtp_layers / kv_cache_groups_tp_replicas markers; the
+#         era floor moved from #61183 (df6c7ad031) to #61455 (c3de0b37). A base
+#         BEFORE c3de0b37 predates the is_draft mechanism this chain rides on, so
+#         the gate correctly FATALs on it (and the FATAL message now cites
+#         #61455, not #61183, which only moved the KV-cache-planning file).
+#   Dry-run on the latest vllm main @ 7879f36 (2026-10-17, post-#61455): era-gate
+#   PASS; all 12 live patches ([3]-[7], [9b]-[12]) strict `git apply` clean; [2] no
+#   longer applied; [8] tritonar stays DISABLED, [9] graphmemprof stays DROPPED
+#   (neither is affected by #61455, which does not touch XPU graph defaults). The
+#   live chain is now [3] visionoffload, [4] embed-quant, [5] mtp-vocab,
+#   [6] getmem, [7] grammar, [9b] mtphitfix, [9c] fstier, [9d] hybridprefill,
+#   [9e] turboquantspec, [10] onercclreset, [11] gdn-capture-gate, [12]
+#   gdn-zero-draft-routing (12 patches). The image name no longer carries the
+#   -mtpeagle suffix.
+
 # 1. Hard reset to a clean state and pull the latest upstream code
 docker builder prune -a -f
 docker image prune -a -f
@@ -433,70 +468,66 @@ V=marcinkuk/vllm-2xb50   # this repo — single source of the patches
 #     era, so check the base's era BEFORE trying to apply anything, and fail
 #     with an actionable message instead of a cryptic per-patch "patch does
 #     not apply". (This is the "patch no longer applies" guard, made specific.)
-#     The [2] mtpeagle patch is the #56026 delta (still open upstream). Its two
-#     files used to be kv_cache_utils.py + tests/v1/core/test_kv_cache_utils.py,
-#     but #61183 (df6c7ad031, merged 2026-10-13, "[Core][Refactor] Move KV cache
-#     planning logic to kv_cache_planning.py") split that logic into a NEW file,
-#     vllm/v1/core/kv_cache_planning.py, and its tests into
-#     tests/v1/core/test_kv_cache_planning.py. Both era markers below —
-#     _uses_trailing_mtp_layers (from merged #55390/0bce411a) and
-#     kv_cache_groups_tp_replicas (from #57652) — MOVED into kv_cache_planning.py
-#     in that same commit and no longer exist in kv_cache_utils.py, so the
-#     re-hunked [2] (which now targets kv_cache_planning.py + the split test
-#     file) only matches main at/after df6c7ad031. That is the binding
-#     era-start (verified on main 7840bede, 2026-10-14). The VLLM_BATCH_INVARIANT
-#     marker (#55881) was the anchor of the now-DISABLED [8] tritonar patch, so
-#     it is no longer a build requirement (it is still in main; kept here for
-#     reference only, not checked).
+#     Since 2026-10-17 the chain's MTP draft-grouping rides on upstream #61455
+#     (c3de0b37, merged 2026-10-17, "[Core][Spec Decode] Replace EAGLE group
+#     heuristics with explicit draft-layer tags"), which DELETED the old
+#     positional heuristic (_annotate_eagle_groups / _uses_trailing_mtp_layers,
+#     from merged #55390/0bce411a) and the separately-prefixed-drafter variant
+#     that our former [2] mtpeagle patch (= #56026 delta) re-implemented, and
+#     replaced all of it with an explicit KVCacheSpec.is_draft tag: the
+#     drafter's attention layers are marked is_draft_layer (llm_base_proposer /
+#     speculator), get_kv_cache_spec() copies that into spec.is_draft, and
+#     get_kv_cache_configs() then flags every KV group holding an is_draft spec
+#     as is_eagle_group. [2] mtpeagle was therefore DROPPED (superseded by
+#     #61455) and the era floor moved to the #61455 merge: a base BEFORE
+#     c3de0b37 predates the is_draft mechanism this chain now depends on.
+#     The era marker below -- the is_draft field on KVCacheSpec in
+#     vllm/v1/kv_cache_interface.py -- is #61455's core: it is absent before
+#     that merge and stable in the file the rest of the chain targets. (The old
+#     markers _uses_trailing_mtp_layers / kv_cache_groups_tp_replicas were the
+#     anchors of the now-DROPPED [2] patch; they are no longer build
+#     requirements and are not checked. VLLM_BATCH_INVARIANT was the anchor of
+#     the still-DISABLED [8] tritonar patch -- also not a build requirement.)
 era_ok=1
 for marker in \
-  "vllm/v1/core/kv_cache_planning.py:_uses_trailing_mtp_layers" \
-  "vllm/v1/core/kv_cache_planning.py:kv_cache_groups_tp_replicas"; do
+  "vllm/v1/kv_cache_interface.py:is_draft"; do
   f="${marker%%:*}"; pat="${marker##*:}"
   if ! git grep -q "$pat" -- "$f"; then
     era_ok=0
-    echo "NOTE: base ${HASH} predates the #61183 merge (df6c7ad031, 2026-10-13);"
-    echo "      ${pat} is not yet in vllm/v1/core/kv_cache_planning.py (it was"
-    echo "      moved out of kv_cache_utils.py by that refactor)."
+    echo "NOTE: base ${HASH} predates the #61455 merge (c3de0b37, 2026-10-17);"
+    echo "      ${pat} is not yet a field on KVCacheSpec in ${f}."
   fi
 done
 if [ "$era_ok" != 1 ]; then
   echo "FATAL: base ${HASH} is outside the verified patch era (needs main at/after"
-  echo "       df6c7ad031, the #61183 merge, 2026-10-13, '[Core][Refactor] Move KV"
-  echo "       cache planning logic to kv_cache_planning.py'. The [2] mtpeagle patch"
-  echo "       now targets kv_cache_planning.py and the split-out test file, which"
-  echo "       did not exist before that merge. Fix: 'git fetch origin &&"
-  echo "       git reset --hard origin/main' and re-run. Known-good main for"
-  echo "       this patch set: df6c7ad031 (2026-10-13) .. 7840bede (2026-10-14,"
+  echo "       c3de0b37, the #61455 merge, 2026-10-17, '[Core][Spec Decode] Replace"
+  echo "       EAGLE group heuristics with explicit draft-layer tags'. The MTP"
+  echo "       draft-grouping this chain now rides on is #61455's explicit"
+  echo "       KVCacheSpec.is_draft tag; the is_draft field is absent in"
+  echo "       vllm/v1/kv_cache_interface.py before that merge. Fix: 'git fetch"
+  echo "       origin && git reset --hard origin/main' and re-run. Known-good main"
+  echo "       for this patch set: c3de0b37 (2026-10-17) .. 7879f36 (2026-10-17,"
   echo "       verified)."
   exit 1
 fi
 
-# 2. MTP separately-prefixed-drafter KV-group fix (#56026, still open). NOTE:
-#    this used to be the COMBINED 55390+56026 patch, but #55390 (Mamba+EAGLE
-#    positional draft-grouping) is now MERGED upstream (2026-09-22), so only the
-#    #56026 delta remains. It flags every KV group holding a separately-prefixed
-#    drafter's layers as a draft group, and keys the all-groups draft fallback
-#    warning on use_eagle_block_drop(). Standalone git-format patch; re-hunked
-#    onto current main 7840bede (2026-10-14). Its two files were
-#    kv_cache_utils.py + tests/v1/core/test_kv_cache_utils.py, but #61183
-#    (df6c7ad031, merged 2026-10-13) split the KV-cache-planning logic into a NEW
-#    file, vllm/v1/core/kv_cache_planning.py, and its tests into
-#    tests/v1/core/test_kv_cache_planning.py — so this patch now targets those
-#    two files (the _annotate_eagle_groups() fix body is byte-identical to the
-#    #56026 delta; only the target path + test anchor moved).
-curl -L "https://raw.githubusercontent.com/${V}/main/patches/0001-56026-on-current-main.patch" -o /tmp/mtpeagle.patch
-git apply /tmp/mtpeagle.patch || { echo "FATAL: 56026 patch no longer applies on ${HASH}."; \
-  echo "       The 56026 patch is the #56026 delta (still open upstream); it now targets" \
-  echo "       vllm/v1/core/kv_cache_planning.py + tests/v1/core/test_kv_cache_planning.py" \
-  echo "       (moved out of kv_cache_utils.py by #61183, df6c7ad031) and must match main" \
-  echo "       blob-for-blob, verified for df6c7ad031 (2026-10-13) .. 7840bede (2026-10-14)." \
-  echo "       Upstream drift: re-hunk the patch onto current main (update the 'index'" \
-  echo "       hashes and the hunk line numbers) and re-run; if the new drift lands in the" \
-  echo "       test file's EOF again, only the test hunk's anchor needs re-aiming." \
-  echo "       (If you saw 'mtpeagle (55390+56026)' here, your script copy is stale —" \
-  echo "       pull this repo and re-run; #55390 is merged, patch is split.)"; exit 1; }
-NAME=${NAME}-mtpeagle
+# 2. [DROPPED 2026-10-17] MTP separately-prefixed-drafter KV-group fix (#56026).
+#    This used to be patch [2] mtpeagle (patches/0001-56026-on-current-main.patch)
+#    -- the #56026 delta on merged #55390, re-hunked after #61183 (df6c7ad031)
+#    to target vllm/v1/core/kv_cache_planning.py + its split test file. It
+#    flagged every KV group holding a separately-prefixed drafter's layers as a
+#    draft group by rewriting the positional fallback in _annotate_eagle_groups().
+#    Upstream #61455 (c3de0b37, merged 2026-10-17, "[Core][Spec Decode] Replace
+#    EAGLE group heuristics with explicit draft-layer tags") DELETED
+#    _annotate_eagle_groups and replaced the whole heuristic with an explicit
+#    KVCacheSpec.is_draft tag (drafter attention layers marked is_draft_layer ->
+#    get_kv_cache_spec() copies it into spec.is_draft -> groups holding an
+#    is_draft spec are flagged is_eagle_group). That mechanism covers #56026's
+#    separately-prefixed-drafter case and more, so [2] is superseded and
+#    DROPPED; re-hunking it would mean re-implementing #61455 in a custom form.
+#    The era-gate (1b) now keys on the #61455 is_draft marker instead. The patch
+#    file patches/0001-56026-on-current-main.patch is left in the vault as
+#    provenance (no longer applied).
 
 # 3. Vision-tower CPU offload (VLLM_VISION_CPU_OFFLOAD_GB). Not upstream.
 curl -L "https://raw.githubusercontent.com/${V}/main/patches/vision-tower-cpu-offload.patch" -o /tmp/visionoffload.patch
