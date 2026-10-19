@@ -1,8 +1,8 @@
 From 000000000 [XPU][V2] Keep grammar-bitmask copies on the current stream under XPU graphs
-# Rebased onto vllm-project/vllm main 9612f77077 (async_tensor_h2d API). Source: CySpiegel PR #53993.
+# Re-hunked 2026-10-19 onto vllm-project/vllm main 283d48f (post #52477 6540d5c8f, merged 2026-10-18: it deleted the _build_grammar_mapping() helper and the num_bonus_tokens ctor param, replacing the mapping with an inline list comprehension). Only the __init__ context changed; the 5 apply_grammar_bitmask hunks are byte-identical to the prior re-hunk. Source: CySpiegel PR #53993 / port of open #53997.
 
 diff --git a/vllm/v1/worker/gpu/structured_outputs.py b/vllm/v1/worker/gpu/structured_outputs.py
-index 057d6f715..c4d6f8bf2 100644
+index 017d7b5..d9b9804 100644
 --- a/vllm/v1/worker/gpu/structured_outputs.py
 +++ b/vllm/v1/worker/gpu/structured_outputs.py
 @@ -1,8 +1,11 @@
@@ -17,7 +17,7 @@ index 057d6f715..c4d6f8bf2 100644
  from vllm.triton_utils import tl, triton
  from vllm.utils.math_utils import cdiv
  from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
-@@ -52,6 +55,9 @@ class StructuredOutputsWorker:
+@@ -62,6 +65,9 @@ class StructuredOutputsWorker:
          )
          self.device = device
          self.copy_stream = torch.cuda.Stream()
@@ -25,9 +25,9 @@ index 057d6f715..c4d6f8bf2 100644
 +        # keeps the grammar-bitmask copies on the current stream instead.
 +        self.use_copy_stream = not current_platform.is_xpu()
          self.mask_stride = mask_stride
-         self.num_bonus_tokens = num_bonus_tokens
  
-@@ -65,8 +71,14 @@ class StructuredOutputsWorker:
+     def apply_grammar_bitmask(
+@@ -74,8 +80,14 @@ class StructuredOutputsWorker:
          if not grammar_req_ids:
              return
  
@@ -43,8 +43,8 @@ index 057d6f715..c4d6f8bf2 100644
              bitmask = async_tensor_h2d(
                  grammar_bitmask, out=self.grammar_bitmask[: grammar_bitmask.shape[0]]
              )
-@@ -85,7 +97,7 @@ class StructuredOutputsWorker:
-         )
+@@ -91,7 +103,7 @@ class StructuredOutputsWorker:
+         ]
  
          # Asynchronously copy the mapping to GPU.
 -        with torch.cuda.stream(self.copy_stream):
@@ -52,7 +52,7 @@ index 057d6f715..c4d6f8bf2 100644
              logits_indices = torch.tensor(
                  mapping, dtype=torch.int32, device="cpu", pin_memory=PIN_MEMORY
              )
-@@ -95,7 +107,8 @@ class StructuredOutputsWorker:
+@@ -101,7 +113,8 @@ class StructuredOutputsWorker:
  
          # Ensure all async copies are complete before launching the kernel.
          current_stream = torch.cuda.current_stream()
@@ -62,7 +62,7 @@ index 057d6f715..c4d6f8bf2 100644
  
          num_masks = bitmask.shape[0]
          assert num_masks == len(mapping)
-@@ -116,7 +129,8 @@ class StructuredOutputsWorker:
+@@ -122,7 +135,8 @@ class StructuredOutputsWorker:
  
          # Ensure the copy stream waits for the device tensors to finish being used
          # before it re-uses or deallocates them
