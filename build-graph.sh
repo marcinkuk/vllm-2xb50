@@ -776,7 +776,7 @@ git apply "$ONERCCLRESETPATCH" || { echo "FATAL: xpu-onerccl-capture-reset patch
   echo "       of XpuCommunicator.all_reduce and on the 'CG Capture: mode=' warmup/capture" \
   echo "       block of CudaGraphManager.capture. Upstream drift: re-hunk (update the" \
   echo "       'index' hashes + context) and re-run."; exit 1; }
-NAME=${NAME}-onercclreset
+NAME=${NAME}-o1ccl   # [10] oneCCL capture-chain reset (tag shortened o1ccl; was onercclreset)
 
 # 11. GDN capture-dummy spec-gate (the #60379 startup crash — the real fix).
 #     #56531 (0eac152707, in every base since 10-06) deleted the GDN gate's
@@ -860,7 +860,48 @@ git apply "$ZEDRTPATCH" || { echo "FATAL: gdn-zero-draft-routing-56531-revert pa
   echo "       mamba_hybrid.py and gpu_model_runner.py. Upstream drift: re-hunk and re-run."; exit 1; }
 NAME=${NAME}-zdroute
 
-# 13. Build the XPU image (graphs-capable).
+# 13. MTP drafter block-size restore (the 0.32.1 MTP acceptance collapse).
+#     A 0.32.1-era base (vllm-64, build 2026-10-19 / 81f7c69577) regressed the
+#     draft block_size in BOTH initialize_attn_backend definitions:
+#       llm_base_proposer.py  ->  self.draft_attn_groups[0].kv_cache_spec.block_size
+#       step3p5.py (Step3p5MTPProposer, the MTP drafter) -> same kv_cache_spec.block_size
+#     That is the KV-cache-MANAGER block size (1600 for this GDN-hybrid config),
+#     NOT the per-layer kernel block size (64) the block table is actually
+#     addressed in. Slot mappings / compute_new_slot_mapping therefore corrupt
+#     the pos2/3 MTP slots and acceptance collapses to ~0.8-3.4% (0.30.1/63
+#     reference: 0.7-0.9 per-position, ~50-69% overall). The 0.30.1 c32495d58f
+#     base that 63 runs had the CORRECT form: llm_base_proposer used
+#     kernel_block_sizes[self.kv_cache_gid] and step3p5 used
+#     get_metadata_builder().kv_cache_spec.block_size (the builder's spec is
+#     copy_with_new_block_size'd to the kernel size). This restores exactly that
+#     0.30.1 form on top of the 0.32.1 base. It touches only
+#     llm_base_proposer.py + step3p5.py, which no other patch in the chain
+#     modifies, so it applies cleanly on top of [1]-[12]. The caller
+#     (gpu_model_runner.initialize_attn_backend -> drafter.initialize_attn_backend)
+#     passes kernel_block_sizes, so the llm_base_proposer primary branch is the
+#     one taken in practice. Drop it if a future base carries the fix natively.
+#     Fetched the same way as [9c]-[12] (local VAULT_LOCAL first, raw URL
+#     fallback, clear FATAL if the vault's main carrying [13] is not pushed).
+MTBLOCKPATCH=""
+if [ -n "${VAULT_LOCAL:-}" ] && [ -f "${VAULT_LOCAL}/patches/xpu-mtp-draft-blocksize-restore.patch" ]; then
+  MTPBLOCKPATCH="${VAULT_LOCAL}/patches/xpu-mtp-draft-blocksize-restore.patch"
+else
+  curl -fL "https://raw.githubusercontent.com/${V}/main/patches/xpu-mtp-draft-blocksize-restore.patch" -o /tmp/mtp-draft-blocksize-restore.patch 2>/dev/null
+  [ -s /tmp/mtp-draft-blocksize-restore.patch ] && MTPBLOCKPATCH=/tmp/mtp-draft-blocksize-restore.patch
+fi
+if [ -z "$MTPBLOCKPATCH" ]; then
+  echo "FATAL: cannot fetch patches/xpu-mtp-draft-blocksize-restore.patch (raw URL 404 --"
+  echo "       the vault's main carrying [13] is not pushed yet). Fix: 'git push"
+  echo "       origin main' in marcinkuk/vllm-2xb50, or set"
+  echo "       VAULT_LOCAL=/path/to/local/vllm-2xb50-checkout and re-run."; exit 1;
+fi
+git apply "$MTPBLOCKPATCH" || { echo "FATAL: xpu-mtp-draft-blocksize-restore patch no longer applies on ${HASH}."; \
+  echo "       It restores the 0.30.1 draft block_size form in llm_base_proposer.py" \
+  echo "       (kernel_block_sizes[gid] primary) and step3p5.py (get_metadata_builder().kv_cache_spec." \
+  echo "       block_size). Upstream drift: re-hunk (update 'index' hashes + context) and re-run."; exit 1; }
+NAME=${NAME}-mtpbs
+
+# 14. Build the XPU image (graphs-capable).
 #     Tag-length guard: Docker image tags cap at 128 chars, and the NAME
 #     accumulates one short suffix per applied patch, so adding a patch can
 #     silently push the tag over the cap and fail only at this docker build
@@ -913,4 +954,10 @@ echo "     fault with UR_RESULT_ERROR_DEVICE_LOST. Steady-state MTP decode still
 echo "     takes the #56531 spec path (the #53912 correctness fix) — only capture"
 echo "     metadata is affected. The captured graphs are byte-identical to the"
 echo "     last working build (base c32495d58f, 2026-10-05)."
+echo "[13] mtpbs restores the 0.30.1 MTP drafter block_size in llm_base_proposer.py"
+echo "     (kernel_block_sizes[gid] primary) and step3p5.py (get_metadata_builder()."
+echo "     kv_cache_spec.block_size). Fixes the 0.32.1-era regression that took the"
+echo "     KV-manager block size (1600) instead of the kernel block size (64), which"
+echo "     corrupted pos2/pos3 slot mappings and collapsed MTP acceptance to ~1.9%"
+echo "     (0.30.1/63 reference: 0.7-0.9 per-position). Needed for any 0.32.1+ base."
 echo "Remember the canary: 5 deterministic prompts, temp=0, sha256 vs eager before trusting graphs."

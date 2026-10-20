@@ -1,0 +1,49 @@
+diff --git a/vllm/v1/spec_decode/llm_base_proposer.py b/vllm/v1/spec_decode/llm_base_proposer.py
+index 0a921542c6..b094a32134 100644
+--- a/vllm/v1/spec_decode/llm_base_proposer.py
++++ b/vllm/v1/spec_decode/llm_base_proposer.py
+@@ -1767,7 +1767,20 @@ class SpecDecodeBaseProposer:
+                     attention_groups[backend_key].layer_names.append(layer_name)
+ 
+         self.draft_attn_groups = list(attention_groups.values())
+-        self.block_size = self.draft_attn_groups[0].kv_cache_spec.block_size
++        if kernel_block_sizes is not None and 0 <= self.kv_cache_gid < len(
++            kernel_block_sizes
++        ):
++            # Slot mappings are computed against the block table, which is
++            # stored at kernel-block granularity. Use the kernel block size
++            # rather than the KV cache manager's block size; the two differ
++            # when manager blocks are split for the attention kernel.
++            self.block_size = kernel_block_sizes[self.kv_cache_gid]
++        else:
++            self.block_size = (
++                self.draft_attn_groups[0]
++                .get_metadata_builder()
++                .kv_cache_spec.block_size
++            )
+         logger.debug("Using block size %d for drafting layers", self.block_size)
+ 
+     def _determine_batch_execution_and_padding(
+diff --git a/vllm/v1/spec_decode/step3p5.py b/vllm/v1/spec_decode/step3p5.py
+index 0853067f39..7f37a5db87 100644
+--- a/vllm/v1/spec_decode/step3p5.py
++++ b/vllm/v1/spec_decode/step3p5.py
+@@ -244,7 +244,17 @@ class Step3p5MTPProposer(EagleProposer):
+         self.draft_attn_groups = list(attention_groups.values())
+         if self.draft_attn_groups:
+             self.kv_cache_gid = self.draft_attn_groups[0].kv_cache_group_id
+-            self.block_size = self.draft_attn_groups[0].kv_cache_spec.block_size
++            # Use the per-layer KERNEL block size: the draft block table is
++            # addressed in kernel blocks, which are smaller than the KV-manager
++            # blocks when manager blocks are split for the attention kernel. The
++            # metadata builder's kv_cache_spec was copy_with_new_block_size'd to
++            # that kernel size, so it carries the correct value (the raw group
++            # kv_cache_spec.block_size would be the manager size, e.g. 1600).
++            self.block_size = (
++                self.draft_attn_groups[0]
++                .get_metadata_builder()
++                .kv_cache_spec.block_size
++            )
+         else:
+             self.kv_cache_gid = 0
+             self.block_size = kv_cache_config.kv_cache_groups[
