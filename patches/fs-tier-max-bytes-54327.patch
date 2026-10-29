@@ -1,5 +1,5 @@
 diff --git a/docs/features/kv_offloading_usage.md b/docs/features/kv_offloading_usage.md
-index 22a2350d80..3e72ded181 100644
+index 7450e0da..5c0cf710 100644
 --- a/docs/features/kv_offloading_usage.md
 +++ b/docs/features/kv_offloading_usage.md
 @@ -88,7 +88,8 @@ vllm serve <model> \
@@ -12,7 +12,7 @@ index 22a2350d80..3e72ded181 100644
          }
        ]
      }
-@@ -160,11 +161,25 @@ The filesystem tier (`type: "fs"`) writes blocks to a filesystem directory.
+@@ -238,11 +239,25 @@ The filesystem tier (`type: "fs"`) writes blocks to a filesystem directory.
  | `root_dir` | yes | — | Base directory; vLLM creates subdirectories beneath it (see [On-Disk Layout](#on-disk-layout)). |
  | `n_read_threads` | no | `16` | Read-priority I/O threads (load path). |
  | `n_write_threads` | no | `16` | Write-priority I/O threads (store path). |
@@ -38,7 +38,7 @@ index 22a2350d80..3e72ded181 100644
  #### On-Disk Layout
  
  Under `root_dir`, vLLM creates a subdirectory `<model>_<digest>`, where `<model>` is the model name with `/` replaced by `_` (so HuggingFace IDs like `meta-llama/Llama-3-8B` don't nest), and `<digest>` is a short SHA256 prefix derived from the run configuration (model, block size, parallelism, dtype, etc.). Runs with the same configuration share the same subdirectory; runs with different configurations live side-by-side under the same `root_dir` without colliding.
-@@ -185,9 +200,11 @@ Inside that subdirectory, blocks are sharded across hash-prefix subdirectories t
+@@ -263,9 +278,11 @@ Inside that subdirectory, blocks are sharded across hash-prefix subdirectories t
  
  #### Cross-Process Sharing
  
@@ -53,10 +53,10 @@ index 22a2350d80..3e72ded181 100644
  ```bash
  PYTHONHASHSEED=<shared-value> vllm serve ...
 diff --git a/tests/v1/kv_offload/tiering/test_fs_tier.py b/tests/v1/kv_offload/tiering/test_fs_tier.py
-index 9c3a64d22a..0f6a7b05f8 100644
+index 767a73f6..d9797616 100644
 --- a/tests/v1/kv_offload/tiering/test_fs_tier.py
 +++ b/tests/v1/kv_offload/tiering/test_fs_tier.py
-@@ -34,7 +34,7 @@ from vllm.v1.kv_offload.config import (
+@@ -35,7 +35,7 @@ from vllm.v1.kv_offload.config import (
      OffloadingModelConfig,
      OffloadingParallelConfig,
  )
@@ -65,8 +65,8 @@ index 9c3a64d22a..0f6a7b05f8 100644
  from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
  from vllm.v1.kv_offload.tiering.fs.manager import (
      FileSystemTierManager,
-@@ -230,6 +230,205 @@ def test_store_creates_file_and_lookup_succeeds(fs_tier):
-     assert os.path.exists(dest), f"Expected file at {dest}"
+@@ -277,6 +277,205 @@ def test_store_accepts_block_published_by_another_writer(fs_tier, monkeypatch):
+         assert f.read() == published
  
  
 +def make_bounded_tier(tmp_path, max_blocks=2):
@@ -272,7 +272,7 @@ index 9c3a64d22a..0f6a7b05f8 100644
      tier, _ = fs_tier
      job_s = make_job(1, [key(1), key(2)], [0, 1])
 diff --git a/vllm/v1/kv_offload/tiering/fs/manager.py b/vllm/v1/kv_offload/tiering/fs/manager.py
-index 6522cfd236..f8d010e027 100644
+index 6522cfd2..f8d010e0 100644
 --- a/vllm/v1/kv_offload/tiering/fs/manager.py
 +++ b/vllm/v1/kv_offload/tiering/fs/manager.py
 @@ -17,8 +17,10 @@ File naming:  <base_path>_r<rank>/<hhh>/<hh>_g<group_idx>/<hash_hex>.bin

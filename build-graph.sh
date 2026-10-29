@@ -448,6 +448,19 @@
 #   [9e] turboquantspec, [10] onercclreset, [11] gdn-capture-gate, [12]
 #   gdn-zero-draft-routing (12 patches). The image name no longer carries the
 #   -mtpeagle suffix.
+#   2026-10-29 (watchdog): dry-run on main @ 914d61fc found ONE re-hunk needed —
+#   [9c] fs-tier-max-bytes-54327. Upstream #61390 (1757f672, merged 2026-10-25,
+#   "[Bugfix][KV Offload] Treat an already-published fs block as stored") added
+#   test_store_accepts_block_published_by_another_writer right where our
+#   bounded-tier test block anchors (test_fs_tier.py @@ -230), breaking strict
+#   apply; the docs hunks shifted line numbers behind 5 upstream commits that
+#   grew kv_offloading_usage.md (#61822/#63266/#61961/#53902/#61050), while
+#   manager.py stayed byte-identical 7879f36..914d61fc. Re-hunked 3-way (kept the
+#   new upstream test AND our block; both are tests, no semantic overlap): docs
+#   hunks re-anchored @@ 160->238 / 185->263, test block @@ 230->277, index
+#   hashes refreshed. Re-run on the 914d61fc tree: all 12 live patches strict
+#   `git apply` clean, era-gate PASS. [8]/[9] unaffected (none of those 5+1
+#   commits touch XPU graph defaults) — both stay as-is.
 
 # 1. Hard reset to a clean state and pull the latest upstream code
 docker builder prune -a -f
@@ -506,7 +519,7 @@ if [ "$era_ok" != 1 ]; then
   echo "       KVCacheSpec.is_draft tag; the is_draft field is absent in"
   echo "       vllm/v1/kv_cache_interface.py before that merge. Fix: 'git fetch"
   echo "       origin && git reset --hard origin/main' and re-run. Known-good main"
-  echo "       for this patch set: c3de0b37 (2026-10-17) .. 7879f36 (2026-10-17,"
+  echo "       for this patch set: c3de0b37 (2026-10-17) .. 914d61fc (2026-10-29,"
   echo "       verified)."
   exit 1
 fi
@@ -624,7 +637,11 @@ NAME=${NAME}-mtphitfix
 #     usage doc, which no earlier patch modifies). The bound is PER RANK
 #     DIRECTORY (<model>_<digest>_r<rank>) and requires exclusive ownership of
 #     it; it is INERT unless the serve --kv-transfer-config fs tier sets
-#     "max_bytes" — see the final echo and the patch README.
+#     "max_bytes" — see the final echo and the patch README. Verified clean on
+#     main @ 7879f36 (2026-10-17); re-hunked 2026-10-29 onto 914d61fc after
+#     upstream #61390 (1757f672) added a store-race test at our test-block
+#     anchor and 5 KV-offload commits shifted the docs hunk lines (see the
+#     header log; manager.py itself stayed byte-identical).
 # The patch lives in THIS vault repo; the raw URL only serves it once the
 # vault's main is pushed. Prefer a local vault checkout (VAULT_LOCAL=/path/to/
 # vllm-2xb50) and fall back to the raw URL; a 404 (not pushed yet) fails with
