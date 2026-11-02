@@ -461,6 +461,43 @@
 #   hashes refreshed. Re-run on the 914d61fc tree: all 12 live patches strict
 #   `git apply` clean, era-gate PASS. [8]/[9] unaffected (none of those 5+1
 #   commits touch XPU graph defaults) — both stay as-is.
+#
+#   RE-VERIFIED 2026-11-02 (watchdog, base moved to 5689c27 / 5689c279): two
+#   re-hunks were needed; the other 10 live patches strict-apply unchanged.
+#     (a) [5] mtp-vocab (qwen35-mtp-draft-vocab.patch): #62111 (5689c27, merged
+#         2026-10-24, "MTP: refactor the model implementation") inserted a new
+#         get_top_tokens() method between compute_logits() and
+#         is_unused_checkpoint_weight() in qwen3_5_mtp.py, shifting the
+#         is_unused_checkpoint_weight anchor that hunk-3 rides on; re-anchored
+#         (4 edits: class docstring, embed init, load_weights remap, and the
+#         is_unused_checkpoint_weight return line) onto the post-#62111 + [4]
+#         embed state.
+#     (b) [9c] fstier (patches/fs-tier-max-bytes-54327.patch): #63695 (19e11424,
+#         2026-10-30, "Refactor KV offloading into manager + worker tiers")
+#         rewrote vllm/v1/kv_offload/tiering/fs/manager.py to job-object
+#         semantics (_store_job_keys -> _store_jobs TransferJob with .keys /
+#         .req_context) and added a req_context kwarg to OffloadingEvent,
+#         breaking our complete_store() hunk. 3-way re-hunked (manager.py was
+#         byte-identical 914d61fc -> 5689c27 at the patch's base blob, so a
+#         clean 3-way merge was possible); the single conflict was resolved by
+#         keeping the upstream store-event block (job.keys / job.req_context)
+#         and layering our two additions on top: the evicted-keys
+#         OffloadingEvent(removed=True) and the `and not skipped` guard on the
+#         store event. docs + test hunks re-anchored to the shifted line
+#         numbers; index hashes refreshed for all 3 files.
+#   Re-run on the 5689c27 tree (docker stubbed, git apply only): all 12 live
+#   patches strict `git apply` clean, era-gate PASS (is_draft marker present),
+#   and every modified .py passes py_compile. Known-good era extended to
+#   c3de0b37 (2026-10-17) .. 5689c27 (2026-11-02, verified). [8] tritonar stays
+#   DISABLED and [9] graphmemprof stays DROPPED (neither commit in
+#   914d61fc..5689c27 touches the XPU graph defaults or oneCCL IPC path —
+#   see #63695/#63748/#63753/#63992/#64307/#64518/#64524; #64367 only touches
+#   XPU cudagraph capture timing, not the one-shot allreduce path [8] would
+#   add). [1] mtpeagle stays DROPPED (superseded by #61455's is_draft tag).
+#   NEXT STEPS (not done in this run — no B50/B70 here): run the live B50/B70
+#   TP=2 canary on a build made from 5689c27 (Qwen3.5-27B MTP, with/without
+#   turboquant_* and with fs-tier max_bytes) to confirm the [5] and [9c]
+#   re-hunks behave correctly at runtime, not just that they apply.
 
 # 1. Hard reset to a clean state and pull the latest upstream code
 docker builder prune -a -f
@@ -519,7 +556,7 @@ if [ "$era_ok" != 1 ]; then
   echo "       KVCacheSpec.is_draft tag; the is_draft field is absent in"
   echo "       vllm/v1/kv_cache_interface.py before that merge. Fix: 'git fetch"
   echo "       origin && git reset --hard origin/main' and re-run. Known-good main"
-  echo "       for this patch set: c3de0b37 (2026-10-17) .. 914d61fc (2026-10-29,"
+  echo "       for this patch set: c3de0b37 (2026-10-17) .. 5689c27 (2026-11-02,"
   echo "       verified)."
   exit 1
 fi
@@ -559,9 +596,13 @@ NAME=${NAME}-noembed
 #    merged 2026-10-07) which rewrote qwen3_5_mtp.py's load_weights remap into
 #    is_unused_checkpoint_weight() + a flat if/elif, breaking this patch's
 #    4th hunk; that hunk now anchors on is_unused_checkpoint_weight (the 10-06
-#    #60152-less pre-image is gone from main). Hunks 1-3 are unchanged. Full
-#    12-patch chain strict-applies clean on c4cd88d9fe (2026-10-08) — known-good
-#    era extended 5463fe49 .. c4cd88d9fe.
+#    #60152-less pre-image is gone from main). Hunks 1-3 are unchanged. Re-hunked
+#    2026-11-02 for #62111 (5689c27, 2026-10-24) which inserted a
+#    get_top_tokens() method between compute_logits() and
+#    is_unused_checkpoint_weight(), shifting hunk-3's context (the method
+#    body is new upstream code; our 4 edits re-anchor around it). Full
+#    12-patch chain strict-applies clean on c4cd88d9fe (2026-10-08); 12-patch
+#    chain (this version) strict-applies clean on 5689c27 (2026-11-02).
 curl -L "https://raw.githubusercontent.com/${V}/main/qwen35-mtp-draft-vocab.patch" -o /tmp/mtp-vocab.patch
 git apply /tmp/mtp-vocab.patch || { echo "FATAL: mtp-vocab patch no longer applies on ${HASH} (apply AFTER embed; re-hunk hunk4 onto the current load_weights remap)"; exit 1; }
 NAME=${NAME}-mtp
@@ -641,7 +682,14 @@ NAME=${NAME}-mtphitfix
 #     main @ 7879f36 (2026-10-17); re-hunked 2026-10-29 onto 914d61fc after
 #     upstream #61390 (1757f672) added a store-race test at our test-block
 #     anchor and 5 KV-offload commits shifted the docs hunk lines (see the
-#     header log; manager.py itself stayed byte-identical).
+#     header log; manager.py itself stayed byte-identical). Re-hunked
+#     2026-11-02 onto 5689c27 (post-#63695, 19e11424b8, 2026-10-30): upstream
+#     rewrote FileSystemTierManager to job-object semantics (_store_job_keys ->
+#     _store_jobs TransferJob with .keys/.req_context), so our max_bytes +
+#     _evict_locked + bounded-store batch path and its OffloadingEvent emission
+#     had to be re-anchored onto the new _store_jobs API (3-way; 1 conflict in
+#     manager.py resolved by keeping the upstream store-event block and adding
+#     our evicted=removed=True event + `and not skipped` guard on top).
 # The patch lives in THIS vault repo; the raw URL only serves it once the
 # vault's main is pushed. Prefer a local vault checkout (VAULT_LOCAL=/path/to/
 # vllm-2xb50) and fall back to the raw URL; a 404 (not pushed yet) fails with

@@ -1,8 +1,8 @@
 diff --git a/vllm/model_executor/models/qwen3_5_mtp.py b/vllm/model_executor/models/qwen3_5_mtp.py
-index cae730b879..2fdec90c52 100644
+index b1d37fdc31..79fe7f581e 100644
 --- a/vllm/model_executor/models/qwen3_5_mtp.py
 +++ b/vllm/model_executor/models/qwen3_5_mtp.py
-@@ -89,6 +89,26 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
+@@ -90,6 +90,26 @@
              prefix=maybe_prefix(prefix, "embed_tokens"),
          )
  
@@ -29,7 +29,7 @@ index cae730b879..2fdec90c52 100644
          # Workaround: mtp.fc is stored as BF16 in NVFP4 checkpoints but is
          # missing from hf_quant_config.json exclude_modules. Force unquantized.
          # Ref: https://github.com/vllm-project/vllm/pull/38650
-@@ -250,6 +270,12 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal, SupportsPP):
+@@ -252,6 +272,12 @@
              self.lm_head = PPMissingLayer()
  
          self.logits_processor = LogitsProcessor(config.vocab_size)
@@ -42,7 +42,7 @@ index cae730b879..2fdec90c52 100644
  
          self.make_empty_intermediate_tensors = (
              self.model.make_empty_intermediate_tensors
-@@ -300,6 +326,18 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal, SupportsPP):
+@@ -307,6 +333,18 @@
          hidden_states: torch.Tensor,
          spec_step_idx: int = 0,
      ) -> torch.Tensor | None:
@@ -60,8 +60,8 @@ index cae730b879..2fdec90c52 100644
 +            return full
          return self.logits_processor(self.lm_head, hidden_states)
  
-     def is_unused_checkpoint_weight(self, name: str) -> bool:
-@@ -310,6 +348,9 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal, SupportsPP):
+     def get_top_tokens(
+@@ -325,6 +363,9 @@
      def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
          def remap_weight_names(weights):
              for name, weight in weights:
