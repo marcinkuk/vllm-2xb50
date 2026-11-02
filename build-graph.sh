@@ -498,6 +498,18 @@
 #   TP=2 canary on a build made from 5689c27 (Qwen3.5-27B MTP, with/without
 #   turboquant_* and with fs-tier max_bytes) to confirm the [5] and [9c]
 #   re-hunks behave correctly at runtime, not just that they apply.
+#
+#   LIVE DRY-RUN 2026-11-02 (production path, docker stubbed): re-ran the
+#   pushed build-graph.sh in a fresh shallow vllm-project/vllm clone with
+#   [3]/[4]/[5] fetched from the pushed raw vault and [9c]+ via VAULT_LOCAL.
+#   The script's auto-fetch pulled one more commit (5689c27 -> 30565c39,
+#   #63137, a Rust-frontend change that does not touch any patched file) and
+#   ALL 12 live patches still strict `git apply` clean on 30565c39 with
+#   era-gate PASS, image
+#   vllm-intel-xpu:2026-11-02_...-vision-noembed-mtp-getmem-grammar-mtphitfix-
+#   fstier-hybrid-tq-o1ccl-gdnccgate-zdroute-mtpbs, RC=0. Known-good era is
+#   therefore c3de0b37 (2026-10-17) .. 30565c39 (2026-11-02, live-verified);
+#   the FATAL known-good range below now reads 30565c39.
 
 # 1. Hard reset to a clean state and pull the latest upstream code
 docker builder prune -a -f
@@ -556,8 +568,8 @@ if [ "$era_ok" != 1 ]; then
   echo "       KVCacheSpec.is_draft tag; the is_draft field is absent in"
   echo "       vllm/v1/kv_cache_interface.py before that merge. Fix: 'git fetch"
   echo "       origin && git reset --hard origin/main' and re-run. Known-good main"
-  echo "       for this patch set: c3de0b37 (2026-10-17) .. 5689c27 (2026-11-02,"
-  echo "       verified)."
+  echo "       for this patch set: c3de0b37 (2026-10-17) .. 30565c39 (2026-11-02,"
+  echo "       live-verified)."
   exit 1
 fi
 
