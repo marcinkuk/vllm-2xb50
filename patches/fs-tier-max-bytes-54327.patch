@@ -1,8 +1,8 @@
 diff --git a/docs/features/kv_offloading_usage.md b/docs/features/kv_offloading_usage.md
-index 6a938dfc0c..86589ed9b0 100644
+index a7c26300..fe0052d5 100644
 --- a/docs/features/kv_offloading_usage.md
 +++ b/docs/features/kv_offloading_usage.md
-@@ -88,7 +88,8 @@
+@@ -88,7 +88,8 @@ vllm serve <model> \
            "type": "fs",
            "root_dir": "/mnt/kv_cache",
            "n_read_threads": 32,
@@ -12,7 +12,7 @@ index 6a938dfc0c..86589ed9b0 100644
          }
        ]
      }
-@@ -245,11 +246,25 @@
+@@ -245,11 +246,25 @@ The filesystem tier (`type: "fs"`) writes blocks to a filesystem directory.
  | `root_dir` | yes | — | Base directory; vLLM creates subdirectories beneath it (see [On-Disk Layout](#on-disk-layout)). |
  | `n_read_threads` | no | `16` | Read-priority I/O threads (load path). |
  | `n_write_threads` | no | `16` | Write-priority I/O threads (store path). |
@@ -38,7 +38,7 @@ index 6a938dfc0c..86589ed9b0 100644
  #### On-Disk Layout
  
  Under `root_dir`, vLLM creates a subdirectory `<model>_<digest>`, where `<model>` is the model name with `/` replaced by `_` (so HuggingFace IDs like `meta-llama/Llama-3-8B` don't nest), and `<digest>` is a short SHA256 prefix derived from the run configuration (model, block size, parallelism, dtype, etc.). Runs with the same configuration share the same subdirectory; runs with different configurations live side-by-side under the same `root_dir` without colliding.
-@@ -270,9 +285,11 @@
+@@ -270,9 +285,11 @@ Inside that subdirectory, blocks are sharded across hash-prefix subdirectories t
  
  #### Cross-Process Sharing
  
@@ -53,10 +53,10 @@ index 6a938dfc0c..86589ed9b0 100644
  ```bash
  PYTHONHASHSEED=<shared-value> vllm serve ...
 diff --git a/tests/v1/kv_offload/tiering/test_fs_tier.py b/tests/v1/kv_offload/tiering/test_fs_tier.py
-index 0d04cfad2b..3761469f93 100644
+index 8c8ebf01..29c73c9e 100644
 --- a/tests/v1/kv_offload/tiering/test_fs_tier.py
 +++ b/tests/v1/kv_offload/tiering/test_fs_tier.py
-@@ -35,7 +35,7 @@
+@@ -35,7 +35,7 @@ from vllm.v1.kv_offload.config import (
      OffloadingModelConfig,
      OffloadingParallelConfig,
  )
@@ -65,7 +65,7 @@ index 0d04cfad2b..3761469f93 100644
  from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
  from vllm.v1.kv_offload.tiering.fs.manager import (
      FileSystemTierManager,
-@@ -277,6 +277,205 @@
+@@ -289,6 +289,205 @@ def test_store_accepts_block_published_by_another_writer(fs_tier, monkeypatch):
          assert f.read() == published
  
  
@@ -272,10 +272,10 @@ index 0d04cfad2b..3761469f93 100644
      tier, _ = fs_tier
      job_s = make_job(1, [key(1), key(2)], [0, 1])
 diff --git a/vllm/v1/kv_offload/tiering/fs/manager.py b/vllm/v1/kv_offload/tiering/fs/manager.py
-index 594e18b9f5..186b9ed97a 100644
+index 91a1dd75..1b5b5b31 100644
 --- a/vllm/v1/kv_offload/tiering/fs/manager.py
 +++ b/vllm/v1/kv_offload/tiering/fs/manager.py
-@@ -17,8 +17,10 @@
+@@ -17,8 +17,10 @@ File naming:  <base_path>_r<rank>/<hhh>/<hh>_g<group_idx>/<hash_hex>.bin
  import functools
  import json
  import os
@@ -288,7 +288,7 @@ index 594e18b9f5..186b9ed97a 100644
  
  try:
      from vllm.fs_io_C import batch_lookup as batch_lookup_C
-@@ -29,14 +31,20 @@
+@@ -29,14 +31,20 @@ except ImportError:
  
  from typing_extensions import override
  
@@ -309,7 +309,7 @@ index 594e18b9f5..186b9ed97a 100644
  )
  from vllm.v1.kv_offload.file_mapper import FileMapper
  from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager
-@@ -105,6 +113,22 @@
+@@ -105,6 +113,22 @@ class FileSystemTierManager(SecondaryTierManager):
      """
  
      medium: ClassVar[Medium] = Medium.STORAGE
@@ -332,7 +332,7 @@ index 594e18b9f5..186b9ed97a 100644
  
      def __init__(
          self,
-@@ -116,6 +140,7 @@
+@@ -116,6 +140,7 @@ class FileSystemTierManager(SecondaryTierManager):
          n_write_threads: int = 16,
          enable_kv_events: bool = False,
          locality: str | None = None,
@@ -340,7 +340,7 @@ index 594e18b9f5..186b9ed97a 100644
          backpressure_detector: BackpressureDetector | None = None,
      ):
          """Args:
-@@ -133,10 +158,19 @@
+@@ -133,10 +158,19 @@ class FileSystemTierManager(SecondaryTierManager):
              to the publishing vLLM instance.
          backpressure_detector: Optional backpressure detector.
  
@@ -360,7 +360,7 @@ index 594e18b9f5..186b9ed97a 100644
          self.locality = Locality(locality) if locality is not None else None
  
          self.events: list[OffloadingEvent] | None = None
-@@ -163,6 +197,9 @@
+@@ -164,6 +198,9 @@ class FileSystemTierManager(SecondaryTierManager):
          # the GIL that read cannot observe the finished job without the prior
          # write, so no extra lock is needed (get_finished is itself lock-free).
          self._load_progress: dict[JobId, int] = {}
@@ -370,7 +370,7 @@ index 594e18b9f5..186b9ed97a 100644
  
          # Extract block size from primary view
          assert primary_kv_view.strides is not None, (
-@@ -177,6 +214,13 @@
+@@ -178,6 +215,13 @@ class FileSystemTierManager(SecondaryTierManager):
              blocks_per_file=offloading_spec.blocks_per_chunk,
              parallel_agnostic=True,
          )
@@ -384,7 +384,7 @@ index 594e18b9f5..186b9ed97a 100644
  
          # Write config file
          config_path = self.file_mapper.get_config_file_path()
-@@ -187,6 +231,13 @@
+@@ -188,6 +232,13 @@ class FileSystemTierManager(SecondaryTierManager):
                      self.file_mapper.get_run_config(), f, indent=2, sort_keys=True
                  )
  
@@ -398,7 +398,7 @@ index 594e18b9f5..186b9ed97a 100644
          # Prefer O_DIRECT to bypass the page cache, but fall back to buffered
          # I/O on filesystems that reject it (e.g. overlayfs, some NFS mounts)
          # rather than failing every block.
-@@ -218,18 +269,176 @@
+@@ -219,17 +270,175 @@ class FileSystemTierManager(SecondaryTierManager):
              return LookupResult.RETRY
          return LookupResult.HIT if result else LookupResult.MISS
  
@@ -565,8 +565,7 @@ index 594e18b9f5..186b9ed97a 100644
      @override
      def submit_store(self, job_metadata: TransferJob) -> None:
          keys = list(job_metadata.keys)
-         if self.events is not None:
-             self._store_jobs[job_metadata.job_id] = job_metadata
+         self._store_jobs[job_metadata.job_id] = job_metadata
          task = functools.partial(
 -            batch_store_block,
 +            self._store_batch,
@@ -579,7 +578,7 @@ index 594e18b9f5..186b9ed97a 100644
          )
          self._job_block_counts[job_metadata.job_id] = len(keys)
          self._pool.enqueue_store(job_metadata.job_id, 1, [task])
-@@ -243,6 +452,10 @@
+@@ -243,6 +452,10 @@ class FileSystemTierManager(SecondaryTierManager):
          self._load_job_keys[job_id] = keys
          self._job_block_counts[job_id] = len(keys)
          paths = [self.file_mapper.get_file_name(key) for key in keys]
@@ -590,7 +589,7 @@ index 594e18b9f5..186b9ed97a 100644
          offsets = [int(cid) * self._block_size for cid in job_metadata.chunk_ids]
  
          def load_task() -> None:
-@@ -280,11 +493,26 @@
+@@ -280,22 +493,45 @@ class FileSystemTierManager(SecondaryTierManager):
          as a miss here (scheduler thread)."""
          results = []
          for job_id, success, transfer_time in self._pool.get_finished():
@@ -602,26 +601,54 @@ index 594e18b9f5..186b9ed97a 100644
 +            success = success and not skipped
              block_count = self._job_block_counts.pop(job_id, 0)
              transfer_bytes = block_count * self._block_size if block_count else None
-             if self.events is not None:
-                 job = self._store_jobs.pop(job_id, None)
--                if success and job is not None and job.keys:
-+                if evicted:
-+                    self.events.append(
-+                        OffloadingEvent(
-+                            keys=list(evicted),
-+                            medium=self.medium,
-+                            removed=True,
-+                            locality=self.locality,
+             job = self._store_jobs.pop(job_id, None)
+             if job is not None and success:
+                 # Successful store makes previously absent keys known-present.
++                # (upstream #64444: keep this OUTSIDE the events guard so it
++                #  runs even when no events consumer is attached)
+                 self._lookup_manager.mark_present(job.keys)
+-                if self.events is not None and job.keys:
+-                    self.events.append(
+-                        OffloadingEvent(
+-                            keys=list(job.keys),
+-                            medium=self.medium,
+-                            removed=False,
+-                            locality=self.locality,
+-                            req_context=job.req_context,
++                if self.events is not None:
++                    # vault [9c] fstier: emit an evicted=removed=True event for
++                    # LRU-evicted keys (max_bytes bound) so the connector sees them.
++                    if evicted:
++                        self.events.append(
++                            OffloadingEvent(
++                                keys=list(evicted),
++                                medium=self.medium,
++                                removed=True,
++                                locality=self.locality,
++                            )
 +                        )
-+                    )
-+                if success and job is not None and job.keys and not skipped:
-                     self.events.append(
-                         OffloadingEvent(
-                             keys=list(job.keys),
-@@ -325,6 +553,26 @@
++                    # vault [9c]: gate the store event on `not skipped` so a
++                    # job we deliberately skipped for capacity (no write happened)
++                    # is not reported as a successful store.
++                    if success and job is not None and job.keys and not skipped:
++                        self.events.append(
++                            OffloadingEvent(
++                                keys=list(job.keys),
++                                medium=self.medium,
++                                removed=False,
++                                locality=self.locality,
++                                req_context=job.req_context,
++                            )
+                         )
+-                    )
+             load_keys = self._load_job_keys.pop(job_id, None)
+             num_succeeded = self._load_progress.pop(job_id, 0)
+             if load_keys is not None and not success:
+@@ -326,6 +562,26 @@ class FileSystemTierManager(SecondaryTierManager):
+             )
          return results
  
-     @override
++    @override
 +    def touch(self, keys: Collection[OffloadKey], req_context: ReqContext) -> None:
 +        del req_context
 +        if self.max_bytes is None:
@@ -641,7 +668,6 @@ index 594e18b9f5..186b9ed97a 100644
 +        stats.set_gauge(self.CACHE_ENTRIES, len(self._entries))
 +        return stats
 +
-+    @override
+     @override
      def take_events(self) -> Iterable[OffloadingEvent]:
          if self.events is not None:
-             yield from self.events

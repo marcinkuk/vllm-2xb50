@@ -508,8 +508,24 @@
 #   era-gate PASS, image
 #   vllm-intel-xpu:2026-11-02_...-vision-noembed-mtp-getmem-grammar-mtphitfix-
 #   fstier-hybrid-tq-o1ccl-gdnccgate-zdroute-mtpbs, RC=0. Known-good era is
-#   therefore c3de0b37 (2026-10-17) .. 30565c39 (2026-11-02, live-verified);
+#   therefore c3de0b37 (2026-10-17) .. c1d8fade (2026-11-03, live-verified.;
 #   the FATAL known-good range below now reads 30565c39.
+#   2026-11-03 (watchdog): dry-run on main @ c1d8fade (post-#64444, 5cdeea9b,
+#   2026-11-03) found ONE re-hunk needed -- [9c] fstier. #64444 "Publish
+#   successful stores to lookup state" moved mark_present(job.keys) out of the
+#   `events is not None` guard in get_finished() (manager.py blob 594e18b9 ->
+#   91a1dd75), breaking the [9c] hunk @@ -218,18 pre-#64444 form; #64299
+#   (ffdf2670) shifted the docs hunk lines. Re-anchored [9c] 3-way (1 conflict
+#   in manager.py, resolved keeping upstream's unguarded mark_present + our
+#   evicted=removed=True event and `not skipped`-gated store event inside the
+#   events guard). All 12 live patches ([3]-[7], [9b]-[13]) strict `git apply`
+#   clean on c1d8fade with era-gate PASS (is_draft marker present). The other 11
+#   patches ([3] visionoffload, [4] embed-quant, [5] mtp-vocab, [6] getmem,
+#   [7] grammar, [9b] mtphitfix, [9d] hybrid-prefill, [9e] turboquant-spec,
+#   [10] onercclreset, [11] gdn-capture-gate, [12] gdn-zero-draft-routing,
+#   [13] xpu-mtp-draft-blocksize) all applied clean with no re-hunk. Known-good
+#   era extended to c3de0b37 (2026-10-17) .. c1d8fade (2026-11-03, live-verified);
+#   the FATAL known-good range below now reads c1d8fade.
 
 # 1. Hard reset to a clean state and pull the latest upstream code
 docker builder prune -a -f
@@ -568,7 +584,7 @@ if [ "$era_ok" != 1 ]; then
   echo "       KVCacheSpec.is_draft tag; the is_draft field is absent in"
   echo "       vllm/v1/kv_cache_interface.py before that merge. Fix: 'git fetch"
   echo "       origin && git reset --hard origin/main' and re-run. Known-good main"
-  echo "       for this patch set: c3de0b37 (2026-10-17) .. 30565c39 (2026-11-02,"
+  echo "       for this patch set: c3de0b37 (2026-10-17) .. c1d8fade (2026-11-03,"
   echo "       live-verified)."
   exit 1
 fi
@@ -702,6 +718,14 @@ NAME=${NAME}-mtphitfix
 #     had to be re-anchored onto the new _store_jobs API (3-way; 1 conflict in
 #     manager.py resolved by keeping the upstream store-event block and adding
 #     our evicted=removed=True event + `and not skipped` guard on top).
+#     Re-hunked 2026-11-03 onto c1d8fade (post-#64444, 5cdeea9b, 2026-11-03):
+#     upstream "Publish successful stores to lookup state" moved
+#     mark_present(job.keys) OUT of the `events is not None` guard in
+#     get_finished() and re-gated the store event on `and not skipped`, so the
+#     [9c] hunk @@ -218,18 (pre-#64444 form) no longer applied. Re-anchored with
+#     a 3-way (1 conflict in manager.py): keep upstream's unguarded mark_present
+#     (runs even with no events consumer) and put our evicted=removed=True event
+#     + the `not skipped`-gated store event back inside the events guard.
 # The patch lives in THIS vault repo; the raw URL only serves it once the
 # vault's main is pushed. Prefer a local vault checkout (VAULT_LOCAL=/path/to/
 # vllm-2xb50) and fall back to the raw URL; a 404 (not pushed yet) fails with
