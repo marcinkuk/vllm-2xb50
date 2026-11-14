@@ -554,7 +554,7 @@
 #                              2026-11-13, 1ea7a90dbe) through the shared
 #                              DraftModelSpeculator base; the old targets no longer
 #                              exist.
-#   Result: all 11 live patches ([3]-[7], [9b]-[12]) strict `git apply` clean on
+#   Result: all 12 live patches ([3]-[7], [9b]-[12]) strict `git apply` clean on
 #   5ec9995 with era-gate PASS (is_draft marker present). [2]/[8]/[9]/[13] stay
 #   DROPPED/DISABLED (unchanged). Known-good era now c3de0b37 (2026-10-17) .. 5ec9995
 #   (2026-11-13, live-verified); the FATAL known-good range below reads 5ec9995.
