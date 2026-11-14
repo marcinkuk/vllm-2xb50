@@ -527,6 +527,38 @@
 #   era extended to c3de0b37 (2026-10-17) .. c1d8fade (2026-11-03, live-verified);
 #   the FATAL known-good range below now reads c1d8fade.
 
+#   RE-VERIFIED 2026-11-13 (watchdog; full patch-chain repair; base main @ 5ec9995):
+#   the Model-Runner-V1 removal (#63373, aac1b2a4, 2026-11-07) broke the chain -- it
+#   deleted/moved the files several patches anchor on (vllm/v1/worker/gpu_model_runner.py
+#   -> vllm/v1/worker/gpu/model_runner.py; the whole vllm/v1/spec_decode/ tree ->
+#   vllm/v1/worker/gpu/spec_decode/) plus 2 env/model-rewrite commits (#59460, #66063).
+#   Repaired this run (vault pushed; re-run a live B50/B70 canary before trusting):
+#     [3]  visionoffload    -- re-hunk (envs.py mode 100755->100644 + #59460
+#                              VLLM_STRICT_QUANT_SCHEME context).
+#     [5]  mtp-vocab        -- re-hunk onto post-#66063 qwen3_5_mtp.py (post-[4] state).
+#     [9d] hybridprefill    -- SEMANTIC re-port: the old _compute_force_uniform_decode
+#                              + compute_iteration_details are gone; the bug (hybrid
+#                              chunked prefill misclassified as uniform decode; upstream
+#                              #47123 still OPEN) now lives in gather_batch_req_state's
+#                              one_token_ext carve-out, gated on not self.model_config.
+#                              is_hybrid (non-hybrid keeps the 1-token-over-context
+#                              decode fast path; hybrid never runs a prefill batch as a
+#                              uniform decode).
+#     [10] onercclreset     -- re-hunk (cudagraph_utils.py import block + capture region
+#                              drifted).
+#     [12] gdn-zero-draft   -- 3rd file (gpu_model_runner.py) RETIRED: the new model
+#                              runner no longer stamps num_decode_draft_tokens/
+#                              use_spec_decode, so only the still-valid gdn_attn.py +
+#                              mamba_hybrid.py hunks remain.
+#     [13] mtp-draft-blocksize -- DROPPED: absorbed by upstream #64777 (merged
+#                              2026-11-13, 1ea7a90dbe) through the shared
+#                              DraftModelSpeculator base; the old targets no longer
+#                              exist.
+#   Result: all 11 live patches ([3]-[7], [9b]-[12]) strict `git apply` clean on
+#   5ec9995 with era-gate PASS (is_draft marker present). [2]/[8]/[9]/[13] stay
+#   DROPPED/DISABLED (unchanged). Known-good era now c3de0b37 (2026-10-17) .. 5ec9995
+#   (2026-11-13, live-verified); the FATAL known-good range below reads 5ec9995.
+
 # 1. Hard reset to a clean state and pull the latest upstream code
 docker builder prune -a -f
 docker image prune -a -f
@@ -584,7 +616,7 @@ if [ "$era_ok" != 1 ]; then
   echo "       KVCacheSpec.is_draft tag; the is_draft field is absent in"
   echo "       vllm/v1/kv_cache_interface.py before that merge. Fix: 'git fetch"
   echo "       origin && git reset --hard origin/main' and re-run. Known-good main"
-  echo "       for this patch set: c3de0b37 (2026-10-17) .. c1d8fade (2026-11-03,"
+  echo "       for this patch set: c3de0b37 (2026-10-17) .. 5ec9995 (2026-11-13,"
   echo "       live-verified)."
   exit 1
 fi
@@ -957,50 +989,25 @@ if [ -z "$ZEDRTPATCH" ]; then
   echo "       VAULT_LOCAL=/path/to/local/vllm-2xb50-checkout and re-run."; exit 1;
 fi
 git apply "$ZEDRTPATCH" || { echo "FATAL: gdn-zero-draft-routing-56531-revert patch no longer applies on ${HASH}."; \
-  echo "       It reverts the #56531 steady-state zero-draft routing in gdn_attn.py," \
-  echo "       mamba_hybrid.py and gpu_model_runner.py. Upstream drift: re-hunk and re-run."; exit 1; }
+  echo "       It reverts the #56531 steady-state zero-draft routing in gdn_attn.py and" \
+  echo "       mamba_hybrid.py (the former 3rd file, gpu_model_runner.py, is retired: the" \
+  echo "       Model-Runner-V1 layout no longer stamps zero-draft rows there). Upstream drift:" \
+  echo "       re-hunk and re-run."; exit 1; }
 NAME=${NAME}-zdroute
 
-# 13. MTP drafter block-size restore (the 0.32.1 MTP acceptance collapse).
-#     A 0.32.1-era base (vllm-64, build 2026-10-19 / 81f7c69577) regressed the
-#     draft block_size in BOTH initialize_attn_backend definitions:
-#       llm_base_proposer.py  ->  self.draft_attn_groups[0].kv_cache_spec.block_size
-#       step3p5.py (Step3p5MTPProposer, the MTP drafter) -> same kv_cache_spec.block_size
-#     That is the KV-cache-MANAGER block size (1600 for this GDN-hybrid config),
-#     NOT the per-layer kernel block size (64) the block table is actually
-#     addressed in. Slot mappings / compute_new_slot_mapping therefore corrupt
-#     the pos2/3 MTP slots and acceptance collapses to ~0.8-3.4% (0.30.1/63
-#     reference: 0.7-0.9 per-position, ~50-69% overall). The 0.30.1 c32495d58f
-#     base that 63 runs had the CORRECT form: llm_base_proposer used
-#     kernel_block_sizes[self.kv_cache_gid] and step3p5 used
-#     get_metadata_builder().kv_cache_spec.block_size (the builder's spec is
-#     copy_with_new_block_size'd to the kernel size). This restores exactly that
-#     0.30.1 form on top of the 0.32.1 base. It touches only
-#     llm_base_proposer.py + step3p5.py, which no other patch in the chain
-#     modifies, so it applies cleanly on top of [1]-[12]. The caller
-#     (gpu_model_runner.initialize_attn_backend -> drafter.initialize_attn_backend)
-#     passes kernel_block_sizes, so the llm_base_proposer primary branch is the
-#     one taken in practice. Drop it if a future base carries the fix natively.
-#     Fetched the same way as [9c]-[12] (local VAULT_LOCAL first, raw URL
-#     fallback, clear FATAL if the vault's main carrying [13] is not pushed).
-MTBLOCKPATCH=""
-if [ -n "${VAULT_LOCAL:-}" ] && [ -f "${VAULT_LOCAL}/patches/xpu-mtp-draft-blocksize-restore.patch" ]; then
-  MTPBLOCKPATCH="${VAULT_LOCAL}/patches/xpu-mtp-draft-blocksize-restore.patch"
-else
-  curl -fL "https://raw.githubusercontent.com/${V}/main/patches/xpu-mtp-draft-blocksize-restore.patch" -o /tmp/mtp-draft-blocksize-restore.patch 2>/dev/null
-  [ -s /tmp/mtp-draft-blocksize-restore.patch ] && MTPBLOCKPATCH=/tmp/mtp-draft-blocksize-restore.patch
-fi
-if [ -z "$MTPBLOCKPATCH" ]; then
-  echo "FATAL: cannot fetch patches/xpu-mtp-draft-blocksize-restore.patch (raw URL 404 --"
-  echo "       the vault's main carrying [13] is not pushed yet). Fix: 'git push"
-  echo "       origin main' in marcinkuk/vllm-2xb50, or set"
-  echo "       VAULT_LOCAL=/path/to/local/vllm-2xb50-checkout and re-run."; exit 1;
-fi
-git apply "$MTPBLOCKPATCH" || { echo "FATAL: xpu-mtp-draft-blocksize-restore patch no longer applies on ${HASH}."; \
-  echo "       It restores the 0.30.1 draft block_size form in llm_base_proposer.py" \
-  echo "       (kernel_block_sizes[gid] primary) and step3p5.py (get_metadata_builder().kv_cache_spec." \
-  echo "       block_size). Upstream drift: re-hunk (update 'index' hashes + context) and re-run."; exit 1; }
-NAME=${NAME}-mtpbs
+# 13. [DROPPED 2026-11-13] MTP drafter block-size restore -- absorbed by upstream
+#     #64777 (merged 2026-11-13, 1ea7a90dbe, '[Bugfix][Spec Decode] Use the target's
+#     kernel block sizes for EAGLE draft attention'). The 0.32.1-era regression this
+#     patch worked around (draft attention using the KV-cache-MANAGER block size 1600
+#     instead of the per-layer kernel block size 64, collapsing MTP acceptance to
+#     ~0.8-3.4%) is now fixed upstream: the speculators no longer carry their own
+#     initialize_attn_backend block_size logic -- the old targets llm_base_proposer.py
+#     + step3p5.py were deleted by the Model-Runner-V1 refactor (#63373) and the kernel
+#     block size now flows through the shared base (vllm/v1/worker/gpu/spec_decode/
+#     speculator.py) using the target's kernel_block_sizes. So [13] has no files left
+#     to patch and is redundant; it is removed from the build chain. The patch file is
+#     kept in the vault (patches/xpu-mtp-draft-blocksize-restore.patch) as provenance,
+#     like the other DROPPED patches [2] and [9].
 
 # 14. Build the XPU image (graphs-capable).
 #     Tag-length guard: Docker image tags cap at 128 chars, and the NAME
@@ -1055,10 +1062,4 @@ echo "     fault with UR_RESULT_ERROR_DEVICE_LOST. Steady-state MTP decode still
 echo "     takes the #56531 spec path (the #53912 correctness fix) — only capture"
 echo "     metadata is affected. The captured graphs are byte-identical to the"
 echo "     last working build (base c32495d58f, 2026-10-05)."
-echo "[13] mtpbs restores the 0.30.1 MTP drafter block_size in llm_base_proposer.py"
-echo "     (kernel_block_sizes[gid] primary) and step3p5.py (get_metadata_builder()."
-echo "     kv_cache_spec.block_size). Fixes the 0.32.1-era regression that took the"
-echo "     KV-manager block size (1600) instead of the kernel block size (64), which"
-echo "     corrupted pos2/pos3 slot mappings and collapsed MTP acceptance to ~1.9%"
-echo "     (0.30.1/63 reference: 0.7-0.9 per-position). Needed for any 0.32.1+ base."
 echo "Remember the canary: 5 deterministic prompts, temp=0, sha256 vs eager before trusting graphs."
