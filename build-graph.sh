@@ -187,23 +187,23 @@
 #
 # Apply order matters: embed-quant [4] BEFORE mtp-vocab [5]; the XPU patches
 # [6]-[7] are independent of the MTP block but applied after it, giving the
-# validated 12-patch flow (visionoffload,embed,mtpvocab,getmem,grammar,
-# mtphitfix,fstier,hybridprefill,turboquantspec,onercclreset,gdn-capture-gate,
-# gdn-zero-draft-routing) — [2] mtpeagle is DROPPED (2026-10-17, superseded by
-# upstream #61455's is_draft tag), [8] tritonar is DISABLED (2026-09-24), and
-# [9] graphmemprof was superseded by upstream #51600 (2026-09-24). The later
+# validated 11-patch flow (visionoffload,embed,mtpvocab,getmem,grammar,
+# mtphitfix,fstier,hybridprefill,turboquantspec,onercclreset,gdn-capture-gate)
+# -- [2] mtpeagle is DROPPED (2026-10-17, superseded by upstream #61455's
+# is_draft tag), [8] tritonar is DISABLED (2026-09-24), [9] graphmemprof was
+# superseded by upstream #51600 (2026-09-24), and [12] gdn-zero-draft-routing is
+# DROPPED (2026-11-14, post-#64777 -- its #56531 revert now corrupts GDN
+# recurrent state on zero-draft decode rows; see the entry below). The later
 # steps each touch a file none of the earlier ENABLED patches modify: [9b]
 # mtphitfix only vllm/v1/core/single_type_kv_cache_manager.py, [9c] fstier only
 # vllm/v1/kv_offload/tiering/fs/manager.py (+ its test + docs), [9d]
-# hybridprefill and [12] gdn-zero-draft-routing both touch
-# vllm/v1/worker/gpu_model_runner.py (+ its test) so they must apply in chain
-# order, [9e] turboquantspec only vllm/v1/attention/backends/turboquant_attn.py,
-# [10] onercclreset only vllm/distributed/device_communicators/xpu_communicator.py
-# + vllm/v1/worker/gpu/cudagraph_utils.py, [11] gdn-capture-gate only
-# vllm/v1/attention/backends/gdn_attn.py, and [12] gdn-zero-draft-routing
-# vllm/v1/attention/backends/gdn_attn.py + mamba_hybrid.py + gpu_model_runner.py
-# ([8] tritonar also touches xpu_communicator.py but is DISABLED) — so [9b] then
-# [9c] then [9d] then [9e] then [10] then [11] then [12] go last, in that order.
+# hybridprefill only vllm/v1/worker/gpu/model_runner.py (+ its test), [9e]
+# turboquantspec only vllm/v1/attention/backends/turboquant_attn.py, [10]
+# onercclreset only vllm/distributed/device_communicators/xpu_communicator.py
+# + vllm/v1/worker/gpu/cudagraph_utils.py, and [11] gdn-capture-gate only
+# vllm/v1/attention/backends/gdn_attn.py ([8] tritonar also touches
+# xpu_communicator.py but is DISABLED) -- so [9b] then [9c] then [9d] then [9e]
+# then [10] then [11] go last, in that order.
 # Every applied patch FAILS THE BUILD loudly if it no longer applies
 # (upstream drift); none silently skip.
 #
@@ -554,10 +554,44 @@
 #                              2026-11-13, 1ea7a90dbe) through the shared
 #                              DraftModelSpeculator base; the old targets no longer
 #                              exist.
-#   Result: all 12 live patches ([3]-[7], [9b]-[12]) strict `git apply` clean on
-#   5ec9995 with era-gate PASS (is_draft marker present). [2]/[8]/[9]/[13] stay
-#   DROPPED/DISABLED (unchanged). Known-good era now c3de0b37 (2026-10-17) .. 5ec9995
-#   (2026-11-13, live-verified); the FATAL known-good range below reads 5ec9995.
+#   Result: at that date the 12-patch chain ([3]-[7], [9b]-[12]) strict `git
+#   apply` clean on 5ec9995 with era-gate PASS (is_draft marker present);
+#   [2]/[8]/[9]/[13] DROPPED/DISABLED. [12] was then DROPPED on 2026-11-14 (see
+#   the entry below) -- current chain status and the FATAL known-good range
+#   are in the 2026-11-14 entry.
+
+# 2026-11-14 (weekly watchdog): DROPPED [12] gdn-zero-draft-routing. Its
+#   #56531 steady-state revert (the gdn_attn.build() 'or sum(drafts)==0' guard +
+#   the mamba_hybrid num_draft_tokens_per_req>0 gate) demotes a batch whose spec
+#   rows all drafted zero to the NON-spec GDN path, which reads the recurrent
+#   state at column 0 and drops num_accepted_tokens; for a zero-draft decode row
+#   that accepted drafts the previous step that slot is STALE, so MTP 'generates
+#   garbage' (no-MTP is unaffected -- it never enters the spec path). #56531's
+#   own regression test (test_zero_draft_batch_still_applies_the_accepted_token_
+#   offset) asserts exactly this invariant and fails under [12]. [12]'s original
+#   build-64 motivation (the 0.8-3.4% acceptance collapse) was the EAGLE-draft
+#   KERNEL block-size mismatch (1600 vs 64), now fixed upstream by #64777
+#   (merged 2026-11-13, 1ea7a90dbe) -- the same fix that dropped [13] -- so
+#   dropping [12] should not re-introduce that collapse. [11] gdn-capture-gate is
+#   retained unchanged (it demotes only the capture dummy, not steady-state
+#   decode, so the #60379 oneCCL-in-capture startup fix survives). Dry-run on
+#   main @ a16bfee (2026-11-14): era-gate PASS (is_draft at
+#   kv_cache_interface.py:669); all 11 live patches ([3]-[7], [9b]-[11]) strict
+#   `git apply` clean; image tag ends in ...-o1ccl-gdnccgate (no -zdroute). The
+#   vault keeps patches/gdn-zero-draft-routing-56531-revert.patch as provenance
+#   (like [2]/[9]/[13]). [2]/[8]/[9]/[13] stay DROPPED/DISABLED. Known-good era
+#   is now c3de0b37 (2026-10-17) .. a16bfee (2026-11-14, live-verified); the
+#   FATAL known-good range below reads a16bfee.
+#
+#   SEPARATE FINDING (same run, post-a16bfee): upstream main advanced
+#   a16bfee -> 6a587fe -> 5039f73 within this run, and #63524 (b575d74ff,
+#   merged 2026-11-14) rewrote kv_offload/tiering/fs/manager.py, breaking
+#   [9c] fstier on current main (the 10 patches other than [9c] still
+#   strict-apply clean on 5039f73). Re-hunking [9c] is a bounded 3-way
+#   semantic merge (3 conflicts in the LRU/capacity subsystem) that needs
+#   GPU validation this run cannot do; it is scoped in the [9c] FATAL above
+#   and NOT applied here. The [12] drop above is independent of [9c] and is
+#   the live change of this run.
 
 # 1. Hard reset to a clean state and pull the latest upstream code
 docker builder prune -a -f
@@ -616,7 +650,7 @@ if [ "$era_ok" != 1 ]; then
   echo "       KVCacheSpec.is_draft tag; the is_draft field is absent in"
   echo "       vllm/v1/kv_cache_interface.py before that merge. Fix: 'git fetch"
   echo "       origin && git reset --hard origin/main' and re-run. Known-good main"
-  echo "       for this patch set: c3de0b37 (2026-10-17) .. 5ec9995 (2026-11-13,"
+  echo "       for this patch set: c3de0b37 (2026-10-17) .. a16bfee (2026-11-14,"
   echo "       live-verified)."
   exit 1
 fi
@@ -775,11 +809,16 @@ if [ -z "$FSTIER_PATCH" ]; then
   echo "       origin main' in marcinkuk/vllm-2xb50, or set"
   echo "       VAULT_LOCAL=/path/to/local/vllm-2xb50-checkout and re-run."; exit 1;
 fi
-git apply "$FSTIER_PATCH" || { echo "FATAL: fs-tier-max-bytes-54327 patch no longer applies on ${HASH}."; \
-  echo "       The patch vendors open upstream #54327 (head 8cd8ebf1) against the" \
-  echo "       tiering fs manager (manager.py + test + docs). Upstream drift:" \
-  echo "       re-hunk the patch onto current main (update the 'index' hashes) and" \
-  echo "       re-run."; exit 1; }
+git apply "$FSTIER_PATCH" || {
+  echo "FATAL: fs-tier-max-bytes-54327 patch no longer applies on ${HASH}."
+  echo "       The patch vendors open upstream #54327 (head 8cd8ebf1) against the tiering"
+  echo "       fs manager (manager.py + test + docs). Upstream drift - most recently"
+  echo "       #63524 (b575d74ff, merged 2026-11-14) rewrote the fs manager store path."
+  echo "       Re-hunk onto current main (3-way: base=a16bfee, ours=+#54327, theirs=main)"
+  echo "       and re-run. [9c] is optional (only used with the fs KV tier max_bytes);"
+  echo "       stop-gap: drop [9c] and serve without the fs bound."
+  exit 1
+}
 NAME=${NAME}-fstier
 
 # 9d. Hybrid-model prefill misclassified as uniform decode (port of upstream
@@ -957,43 +996,29 @@ git apply "$GDNCAPGATEPATCH" || { echo "FATAL: gdn-capture-gate-56531 patch no l
   echo "       and re-run."; exit 1; }
 NAME=${NAME}-gdnccgate
 
-# 12. GDN zero-draft routing restore (revert #56531 steady-state — the build-64
-#     MTP acceptance collapse). #56531 (0eac152707) re-routes EVERY non-prefill
-#     decode row, including zero-draft rows, through the GDN speculative path,
-#     in three places: gdn_attn.build() drops its "or sum(drafts)==0" guard,
-#     mamba_hybrid drops the "num_draft_tokens_per_req>0" requirement, and
-#     gpu_model_runner flips use_spec_decode to "speculative_config is not
-#     None" (2 sites) + stamps zero-draft rows with num_decode_draft_tokens=0.
-#     On this GDN hybrid + MTP drafter a single-request verify step whose only
-#     non-prefill row is a zero-draft decode is mis-routed through the spec
-#     path and reads its recurrent state at the wrong slot: the first drafted
-#     token is effectively random and all MTP follow-on steps are rejected,
-#     collapsing acceptance to ~0.8-3.4% (vs ~50-69% on the 63 c32495d58 base;
-#     same checkpoint, same command, n=3). This reverts ONLY those three
-#     steady-state hunks to the 63 form, while LEAVING [11]'s capture path
-#     (build_for_cudagraph_capture -> build(..., None)) intact so the #60379
-#     oneCCL-in-capture fix survives. #58463 and the AITER/FlashInfer
-#     prefill-checkpoint machinery are untouched (neither runs in this XPU
-#     steady-state decode path). Applies clean on top of [11] in either order
-#     (verified 2026-10-15); re-hunk if these three files drift again upstream.
-ZEDRTPATCH=""
-if [ -n "${VAULT_LOCAL:-}" ] && [ -f "${VAULT_LOCAL}/patches/gdn-zero-draft-routing-56531-revert.patch" ]; then
-  ZEDRTPATCH="${VAULT_LOCAL}/patches/gdn-zero-draft-routing-56531-revert.patch"
-else
-  curl -fL "https://raw.githubusercontent.com/${V}/main/patches/gdn-zero-draft-routing-56531-revert.patch" -o /tmp/gdn-zero-draft-routing.patch 2>/dev/null
-  [ -s /tmp/gdn-zero-draft-routing.patch ] && ZEDRTPATCH=/tmp/gdn-zero-draft-routing.patch
-fi
-if [ -z "$ZEDRTPATCH" ]; then
-  echo "FATAL: cannot fetch patches/gdn-zero-draft-routing-56531-revert.patch (raw URL 404 —"
-  echo "       the vault's main may not be pushed yet). Set"
-  echo "       VAULT_LOCAL=/path/to/local/vllm-2xb50-checkout and re-run."; exit 1;
-fi
-git apply "$ZEDRTPATCH" || { echo "FATAL: gdn-zero-draft-routing-56531-revert patch no longer applies on ${HASH}."; \
-  echo "       It reverts the #56531 steady-state zero-draft routing in gdn_attn.py and" \
-  echo "       mamba_hybrid.py (the former 3rd file, gpu_model_runner.py, is retired: the" \
-  echo "       Model-Runner-V1 layout no longer stamps zero-draft rows there). Upstream drift:" \
-  echo "       re-hunk and re-run."; exit 1; }
-NAME=${NAME}-zdroute
+# 12. [DROPPED 2026-11-14] GDN zero-draft routing restore -- reverted merged
+#     upstream #56531 (0eac152707, merged 2026-10-05, '[Bugfix] Route every
+#     speculation-capable row through the speculative path so recurrent state
+#     stays consistent'). #56531 re-routes EVERY non-prefill decode row, including
+#     zero-draft rows, through the GDN speculative path so its recurrent state is
+#     read at column num_accepted_tokens-1; [12] reverted that steady-state routing
+#     (the gdn_attn.build() 'or sum(drafts)==0' guard + the mamba_hybrid
+#     num_draft_tokens_per_req>0 gate), sending a batch whose spec rows all
+#     drafted zero onto the NON-spec path, which reads the recurrent state at
+#     column 0 and drops num_accepted_tokens. For a zero-draft decode row that
+#     accepted drafts the previous step that slot is STALE -- the first drafted
+#     token is effectively random and MTP follow-ons are rejected, i.e. 'MTP
+#     generates garbage' (no-MTP is unaffected; #56531's own regression test
+#     test_zero_draft_batch_still_applies_the_accepted_token_offset fails under
+#     [12]). [12]'s original build-64 motivation (the 0.8-3.4% acceptance collapse)
+#     was the EAGLE-draft KERNEL block-size mismatch (1600 vs 64), now fixed
+#     upstream by #64777 (merged 2026-11-13, 1ea7a90dbe) -- the same fix that
+#     dropped [13] -- so reverting #56531 is no longer needed. The patch file is
+#     kept in the vault (patches/gdn-zero-draft-routing-56531-revert.patch) as
+#     provenance, like the other DROPPED patches [2], [9] and [13]; [11]
+#     gdn-capture-gate is the last applied patch (it only demotes the capture
+#     dummy, not steady-state decode, so the #60379 oneCCL-in-capture fix is
+#     unaffected). Re-introducing [12] would restore the stale-state garbage.
 
 # 13. [DROPPED 2026-11-13] MTP drafter block-size restore -- absorbed by upstream
 #     #64777 (merged 2026-11-13, 1ea7a90dbe, '[Bugfix][Spec Decode] Use the target's
