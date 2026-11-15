@@ -593,6 +593,34 @@
 #   and NOT applied here. The [12] drop above is independent of [9c] and is
 #   the live change of this run.
 
+# 2026-11-15 (weekly watchdog): RE-HUNKED [9c] fstier onto post-#63524 main.
+#   Resolves the 2026-11-14 'SEPARATE FINDING': upstream main is now ca8952a
+#   (post-#63524 b575d74ff, 2026-11-14, '[Bugfix][KV Offload] Report only
+#   written blocks from fs tier store jobs', which moved _job_block_counts
+#   into the store task and dropped the functools store path; main advanced
+#   5039f73 -> ca8952a since, but no commit in 5039f73..ca8952a touches the
+#   [9c] files, so the re-hunk holds on ca8952a). 3-way (base=a16bfee,
+#   ours=+#54327, theirs=ca8952a; 3 conflicts in manager.py's store/LRU
+#   subsystem, all resolved): our bounded-capacity _evict_locked /
+#   reserved-bytes / skip-oversized-batch path fused onto #63524's store-task
+#   form (the pool worker reports blocks actually written, so a re-stored
+#   published prefix reports transfer_bytes=0 and our evicted/skipped jobs
+#   report None). get_finished_jobs() keeps #63524's _load_progress /
+#   _load_job_keys failed-load handling plus #64444's unguarded mark_present
+#   plus our evicted=removed=True event; submit_load's _load_paths protection
+#   fused with upstream's key-tracking. test_fs_tier.py keeps BOTH #63524's
+#   test_store_reports_only_newly_written_blocks and our 8 bounded-tier tests
+#   (verified consistent: skipped/evicted -> success=False, block_count unset
+#   -> transfer_bytes=None, partial-failure -> num_succeeded kept); docs hunk
+#   re-anchored. Verified (docker stubbed): apply-check + apply + py_compile
+#   of manager.py/test on a fresh ca8952a worktree, and the full 11-patch
+#   chain ([3]-[7], [9b]-[11], [9c] last among the 9c/9d/9e/10/11 group)
+#   strict-applies clean on ca8952a; image tag ends in ...-gdnccgate.
+#   Known-good era now c3de0b37 (2026-10-17) .. ca8952a (2026-11-15,
+#   live-verified); FATAL known-good range updated. [9c] remains inert unless
+#   the serve fs tier sets max_bytes (see the final echo); full GPU/runtime
+#   validation of the bounded path is still open (no torch/vllm in this env).
+
 # 1. Hard reset to a clean state and pull the latest upstream code
 docker builder prune -a -f
 docker image prune -a -f
@@ -650,7 +678,7 @@ if [ "$era_ok" != 1 ]; then
   echo "       KVCacheSpec.is_draft tag; the is_draft field is absent in"
   echo "       vllm/v1/kv_cache_interface.py before that merge. Fix: 'git fetch"
   echo "       origin && git reset --hard origin/main' and re-run. Known-good main"
-  echo "       for this patch set: c3de0b37 (2026-10-17) .. a16bfee (2026-11-14,"
+  echo "       for this patch set: c3de0b37 (2026-10-17) .. ca8952a (2026-11-15,"
   echo "       live-verified)."
   exit 1
 fi
@@ -792,6 +820,22 @@ NAME=${NAME}-mtphitfix
 #     a 3-way (1 conflict in manager.py): keep upstream's unguarded mark_present
 #     (runs even with no events consumer) and put our evicted=removed=True event
 #     + the `not skipped`-gated store event back inside the events guard.
+#     Re-hunked 2026-11-15 onto ca8952a (post-#63524, b575d74ff, 2026-11-14):
+#     #63524 "Report only written blocks from fs tier store jobs" rewrote
+#     submit_store to compute _job_block_counts INSIDE the store task (the pool
+#     worker sets it to batch_store_block's int return = blocks actually
+#     written, so a re-stored published prefix reports 0) instead of setting
+#     len(keys) ahead of time, and dropped the functools.partial store path.
+#     Our bounded-capacity path (_evict_locked / reserved-bytes /
+#     skip-oversized-batch) re-anchors onto that new store-task form and sets
+#     _job_block_counts to the blocks actually stored (evicted/skipped excluded),
+#     so the two fuse cleanly. 3-way (base=a16bfee, ours=+#54327,
+#     theirs=ca8952a; 3 conflicts, all in manager.py's store/LRU subsystem) +
+#     the matching test re-hunk (the test keeps BOTH #63524's
+#     test_store_reports_only_newly_written_blocks and our 8 bounded-tier tests)
+#     + the usage-doc re-hunk. Verified: apply-check + apply + py_compile of
+#     manager.py/test on a fresh ca8952a worktree; full 11-patch chain
+#     strict-applies clean on ca8952a (the live base).
 # The patch lives in THIS vault repo; the raw URL only serves it once the
 # vault's main is pushed. Prefer a local vault checkout (VAULT_LOCAL=/path/to/
 # vllm-2xb50) and fall back to the raw URL; a 404 (not pushed yet) fails with
@@ -813,10 +857,11 @@ git apply "$FSTIER_PATCH" || {
   echo "FATAL: fs-tier-max-bytes-54327 patch no longer applies on ${HASH}."
   echo "       The patch vendors open upstream #54327 (head 8cd8ebf1) against the tiering"
   echo "       fs manager (manager.py + test + docs). Upstream drift - most recently"
-  echo "       #63524 (b575d74ff, merged 2026-11-14) rewrote the fs manager store path."
-  echo "       Re-hunk onto current main (3-way: base=a16bfee, ours=+#54327, theirs=main)"
-  echo "       and re-run. [9c] is optional (only used with the fs KV tier max_bytes);"
-  echo "       stop-gap: drop [9c] and serve without the fs bound."
+  echo "       #63524 (b575d74ff, merged 2026-11-14) rewrote the fs manager store path"
+  echo "       (this patch is re-hunked onto post-#63524 main ca8952a)."
+  echo "       Re-hunk onto current main (3-way: base=<last-rehunked main>, ours=+#54327,"
+  echo "       theirs=main) and re-run. [9c] is optional (only used with the fs KV tier"
+  echo "       max_bytes); stop-gap: drop [9c] and serve without the fs bound."
   exit 1
 }
 NAME=${NAME}-fstier
